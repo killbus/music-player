@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+if [ "$1" = purge ]; then
+    deb-systemd-helper purge music-player.service
+fi
+case "$1" in
+    remove|purge)
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload
+        fi
+        ;;
+esac
+# Database, settings, music and cache are administrator-owned retained state.

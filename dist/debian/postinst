@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+if [ "$1" = configure ]; then
+    # Record unit links for purge without enabling the service.
+    deb-systemd-helper update-state music-player.service
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload
+        # Preserve both administrator choices: enabled state and running state.
+        if systemctl --quiet is-active music-player.service; then
+            deb-systemd-invoke restart music-player.service
+        fi
+    fi
+fi
