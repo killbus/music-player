@@ -3,13 +3,18 @@
 The CLI contains the daemon, terminal client and embedded Web UI. The Slint
 desktop application is a separate build. This pipeline produces amd64 and arm64
 archives, CLI DEB/RPM packages and a multi-platform GHCR image from the same
-binary per architecture. No Cargo build runs while assembling the runtime image.
+binary per architecture. The runtime image copies that executable directly;
+it does not install the CLI DEB or run Cargo.
 
-The build and DEB/runtime baseline is **Ubuntu 24.04**; RPM installation and
-playback are checked on **Fedora 44**. Dependencies are derived from the ELF
-binary. Compatibility with other releases, including Debian 11/12, is not
-established by these checks. See the release's per-architecture dependency,
-build and runtime evidence. Native dependencies still apply to tar archives.
+The build and DEB baseline is **Ubuntu 24.04**; the runtime image uses the official
+**Debian 13 (`trixie-slim`)** image. RPM installation and playback are checked on
+**Fedora 44**. Package dependencies are derived from the ELF binary. The container
+installs CA certificates, ALSA, glibc and the GCC/C++ runtime libraries; CI checks
+dynamic linking and playback on both architectures. Current binaries require
+glibc >= 2.39, so Alpine/musl is not a drop-in base replacement. Compatibility
+with other releases, including Debian 11/12, is not established by these checks.
+See the release's per-architecture dependency, build and runtime evidence.
+Native dependencies still apply to tar archives.
 
 ## Install a package
 
@@ -120,13 +125,26 @@ changing the application directory does not relocate settings/SQLite.
 `MUSIC_PLAYER_AUDIO_OUTPUT` remains configurable. Web UI is on port 5053,
 gRPC on 5051 and WebSocket on 5052. Map the ports you use.
 
+The container starts the daemon directly. It does not install the music-player
+DEB, its systemd unit or `/etc/default/music-player`. Configure the container
+with environment variables and its persisted settings. The `trixie-slim` tag
+stays on Debian 13 while
+receiving base updates at build time. See the [official image documentation](https://github.com/docker-library/docs/tree/master/debian)
+and [supported tags/architectures](https://github.com/docker-library/official-images/blob/master/library/debian).
+
 ## Build, validate and publish
 
 Work on an independent branch. `Linux CLI distribution` runs on PRs and the
 distribution feature branch, producing artifacts without release writes. Native
 amd64/arm64 CI performs the heavy Rust/UI builds, byte identity checks, DEB
 systemd lifecycle tests, clean DEB/RPM container installs, library/Web UI
-readiness, FIFO audio and persistence checks. Merge a reviewed, passing PR with
+readiness, FIFO audio and persistence checks. Ubuntu DEB and Fedora RPM installs
+are tested separately from the published Debian image. CI also records installed
+library versions and compares full uncompressed image sizes against the previous
+Ubuntu + DEB layout using the same binary (`image-comparison-<arch>.json` in the
+release evidence). This measures stored layers, including the DEB retained in
+the old layout's COPY layer; it is not a registry download-size comparison.
+Merge a reviewed, passing PR with
 squash to keep mainline history focused. Packaging tests use deterministic local
 audio; they do not certify Emby/Jellyfin TV/STRM playback or a physical speaker.
 
