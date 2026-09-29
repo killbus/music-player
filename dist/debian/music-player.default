@@ -1,0 +1,5 @@
+# Configure before enabling music-player.service.
+# The default output is CPAL; a system service needs access to its output device.
+# For FIFO, see dist/README.md for a systemd permission drop-in.
+# MUSIC_PLAYER_AUDIO_OUTPUT=fifo:/run/snapcast/music-player.fifo
+# MUSIC_PLAYER_MUSIC_DIRECTORY=/srv/music

@@ -1,0 +1,23 @@
+[Unit]
+Description=Music Player server
+After=network.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=music-player music-player/music
+CacheDirectory=music-player
+WorkingDirectory=/var/lib/music-player
+Environment=XDG_CONFIG_HOME=/var/lib/music-player/config
+Environment=XDG_CACHE_HOME=/var/cache/music-player
+Environment=MUSIC_PLAYER_APPLICATION_DIRECTORY=/var/lib/music-player/config/music-player
+Environment=MUSIC_PLAYER_MUSIC_DIRECTORY=/var/lib/music-player/music
+Environment=MUSIC_PLAYER_MODE=server
+EnvironmentFile=-/etc/default/music-player
+ExecStart=/usr/bin/music-player
+Restart=on-failure
+RestartSec=5
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,87 +1,161 @@
-name: release
+name: Linux CLI distribution
 on:
+  pull_request:
+    paths-ignore: ['**/*.md']
+  push:
+    branches: [master, 'feat/headless-release']
+    paths-ignore: ['**/*.md']
   release:
-    types: [created]
+    types: [published]
   workflow_dispatch:
     inputs:
       tag:
-        description: "The existing release tag to build and upload assets for (e.g. v0.2.0)"
+        description: 'Optional existing tag; required for publishing'
         type: string
-        required: true
+      publish:
+        description: 'Upload to an existing release and publish the versioned GHCR image'
+        type: boolean
+        default: false
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: linux-cli-${{ github.event.release.tag_name || inputs.tag || github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        target:
-          - x86_64-unknown-linux-gnu
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.meta.outputs.sha }}
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      image: ${{ steps.meta.outputs.image }}
+      publish: ${{ steps.meta.outputs.publish }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.tag || github.ref }}
-
-      - name: Set release version
-        run: echo "RELEASE_VERSION=${TAG_INPUT:-${GITHUB_REF#refs/*/}}" >> $GITHUB_ENV
+          ref: ${{ inputs.tag || github.event.release.tag_name || github.ref }}
+          persist-credentials: false
+      - name: Resolve source and release identity
+        id: meta
         env:
-          TAG_INPUT: ${{ inputs.tag }}
+          REQUESTED_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+          PUBLISH: ${{ github.event_name == 'release' || inputs.publish == true }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release-metadata.py
+      - name: Recheck Action releases and documentation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/check-action-versions.py .github/workflows/release.yml
 
-      - name: Vendor DuckDB
-        # `libduckdb-sys` resolves `-l static=duckdb_static` when its own crate
-        # compiles, and Cargo gives no way to order another crate's build script
-        # ahead of that — so the libraries must be on disk before cargo runs at
-        # all. See scripts/fetch-duckdb.sh.
-        run: ./scripts/fetch-duckdb.sh
-
-      - uses: actions/setup-node@v4
+  build:
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            target: aarch64-unknown-linux-gnu
+    env:
+      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+      TARGET: ${{ matrix.target }}
+      ARCH: ${{ matrix.arch }}
+      SOURCE_REVISION: ${{ needs.prepare.outputs.sha }}
+      IMAGE_SOURCE: https://github.com/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: 24
-
-      - uses: oven-sh/setup-bun@v2
-
-      - name: Install Rust 1.98.0
-        run: |
-          rustup toolchain install 1.98.0 --profile minimal
-          rustup default 1.98.0
-          rustup target add ${{ matrix.target }}
-
-      - uses: actions/cache@v4
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-${{ matrix.target }}-release-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Install dependencies
+          bun-version: '1.4.2'
+      - name: Install build and package tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libasound2-dev pkg-config protobuf-compiler
-
-      - name: Build webui
+          sudo apt-get install -y build-essential libasound2-dev pkg-config protobuf-compiler dpkg-dev rpm cpio unzip
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup target add --toolchain 1.98.0 "$TARGET"
+      - name: Build embedded Web UI and canonical CLI
         run: |
-          cd webui/musicplayer
-          bun install
-          bun run build
-
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Package binary
+          bash scripts/fetch-duckdb.sh
+          (cd webui/musicplayer && bun install --frozen-lockfile && bun run build)
+          cargo +1.98.0 build --locked --release --target "$TARGET" -p music-player --bin music-player
+          strip --strip-debug "target/$TARGET/release/music-player"
+      - name: Package and verify binary identity
+        run: bash scripts/package-headless.sh
+      - name: Test DEB systemd lifecycle on the native runner
+        run: sudo --preserve-env=ARCH python3 scripts/test-systemd.py
+      - name: Assemble and test native runtime image and packages
         run: |
-          ASSET=music-player_${{ env.RELEASE_VERSION }}_${{ matrix.target }}
-          tar czvf $ASSET.tar.gz -C target/${{ matrix.target }}/release music-player
-          sha256sum $ASSET.tar.gz > $ASSET.tar.gz.sha256
+          docker build --platform "linux/$ARCH" -f dist/Dockerfile \
+            --label "org.opencontainers.image.source=$IMAGE_SOURCE" \
+            --label "org.opencontainers.image.revision=$SOURCE_REVISION" \
+            --label "org.opencontainers.image.version=$RELEASE_VERSION" \
+            --label 'org.opencontainers.image.licenses=MIT' \
+            -t "music-player-ci:$ARCH" dist/build/image
+          python3 scripts/test-headless.py "music-player-ci:$ARCH" "$ARCH"
+          bash scripts/test-rpm.sh
+          mkdir -p dist/build/image-export
+          docker save "music-player-ci:$ARCH" | gzip -1 > "dist/build/image-export/image-$ARCH.tar.gz"
+      - name: Upload packages and validation evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-cli-${{ matrix.arch }}
+          path: dist/build/release/*
+          compression-level: 0
+          if-no-files-found: error
+      - name: Upload tested runtime image
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-image-${{ matrix.arch }}
+          path: dist/build/image-export/*
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
+      - name: Preserve diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-diagnostics-${{ matrix.arch }}
+          path: dist/build/evidence/
+          if-no-files-found: warn
 
-      - name: Upload release assets
-        run: |
-          gh release upload ${{ env.RELEASE_VERSION }} \
-            music-player_${{ env.RELEASE_VERSION }}_${{ matrix.target }}.tar.gz \
-            music-player_${{ env.RELEASE_VERSION }}_${{ matrix.target }}.tar.gz.sha256 \
-            --clobber
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  publish:
+    if: needs.prepare.outputs.publish == 'true'
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      packages: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+      IMAGE: ${{ needs.prepare.outputs.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: linux-cli-*
+          path: dist/build/release
+          merge-multiple: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: linux-image-*
+          path: dist/build/image-export
+          merge-multiple: true
+      - name: Publish tested artifacts
+        run: python3 scripts/publish-headless.py
