@@ -3,7 +3,7 @@ on:
   pull_request:
     paths-ignore: ['**/*.md']
   push:
-    branches: [master, 'feat/headless-release']
+    branches: [master, 'feat/headless-release', 'feat/slim-runtime']
     paths-ignore: ['**/*.md']
   release:
     types: [published]
@@ -96,13 +96,7 @@ jobs:
         run: sudo --preserve-env=ARCH python3 scripts/test-systemd.py
       - name: Assemble and test native runtime image and packages
         run: |
-          docker build --platform "linux/$ARCH" -f dist/Dockerfile \
-            --label "org.opencontainers.image.source=$IMAGE_SOURCE" \
-            --label "org.opencontainers.image.revision=$SOURCE_REVISION" \
-            --label "org.opencontainers.image.version=$RELEASE_VERSION" \
-            --label 'org.opencontainers.image.licenses=MIT' \
-            -t "music-player-ci:$ARCH" dist/build/image
-          python3 scripts/test-headless.py "music-player-ci:$ARCH" "$ARCH"
+          bash scripts/test-container.sh
           bash scripts/test-rpm.sh
           mkdir -p dist/build/image-export
           docker save "music-player-ci:$ARCH" | gzip -1 > "dist/build/image-export/image-$ARCH.tar.gz"

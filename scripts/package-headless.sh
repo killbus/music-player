@@ -5,9 +5,10 @@ binary="$(pwd)/target/$TARGET/release/music-player"
 bash dist/package-linux.sh all "$RELEASE_VERSION" "$ARCH" "$(dirname "$binary")" cli
 out="$(pwd)/dist/build/release"
 evidence="$(pwd)/dist/build/evidence"
-mkdir -p "$out" "$evidence" "dist/build/image/packages/$ARCH"
+mkdir -p "$out" "$evidence" "dist/build/image/binaries/$ARCH"
 cp dist/music-player-cli_*.deb dist/music-player-cli-*.rpm "$out/"
-cp dist/music-player-cli_*.deb "dist/build/image/packages/$ARCH/"
+install -m0755 "$binary" "dist/build/image/binaries/$ARCH/music-player"
+cp LICENSE dist/build/image/
 asset="music-player_v${RELEASE_VERSION}_$TARGET"
 tar -czf "$out/$asset.tar.gz" -C "$(dirname "$binary")" music-player -C "$(pwd)" LICENSE
 ldd "$binary" | tee "$evidence/ldd-$ARCH.txt"
@@ -43,7 +44,8 @@ metadata = {key: os.environ[key] for key in ('SOURCE_REVISION', 'RELEASE_VERSION
 metadata.update(binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
                 rust=subprocess.check_output(['rustc', '+1.98.0', '--version'], text=True).strip(),
                 bun=subprocess.check_output(['bun', '--version'], text=True).strip(),
-                runtime_baseline='Ubuntu 24.04',
+                build_baseline='Ubuntu 24.04', deb_baseline='Ubuntu 24.04',
+                runtime_baseline='Debian 13 (trixie-slim)',
                 version=subprocess.check_output([str(binary), '--version'], text=True).strip())
 output.write_text(json.dumps(metadata, indent=2) + '\n')
 PY

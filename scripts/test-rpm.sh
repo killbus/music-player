@@ -37,7 +37,7 @@ rpmbuild --define "_topdir $(pwd)/dist/build/legacy-rpm" -bb dist/build/legacy.s
 cp dist/build/legacy-rpm/RPMS/noarch/*.rpm dist/build/legacy.rpm
 for format in deb rpm; do
   if [[ "$format" == deb ]]; then
-    test_image="music-player-ci:$ARCH"
+    test_image="music-player-deb-test:$ARCH"
     install_command='dpkg -i /legacy.deb'
   else
     test_image="music-player-rpm-test:$ARCH"
