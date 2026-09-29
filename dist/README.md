@@ -62,9 +62,10 @@ source = pipe:///run/snapcast/music-player.fifo?name=MusicPlayer&sampleformat=44
 ```
 
 Set `MUSIC_PLAYER_AUDIO_OUTPUT=fifo:/run/snapcast/music-player.fifo` in
-`/etc/default/music-player`. Start the reader first and grant the service write
-access to that existing FIFO. For example, with an existing `snapcast` group and
-a group-writable FIFO, use `sudo systemctl edit music-player`:
+`/etc/default/music-player`. Start the reader first and grant the service read
+and write access to that existing FIFO. The playback engine opens it read/write.
+For example, with an existing `snapcast` group and a FIFO with group read/write
+permissions (such as mode `0660`), use `sudo systemctl edit music-player`:
 
 ```ini
 [Service]
@@ -107,9 +108,10 @@ docker compose -f dist/compose.snapcast.yml up -d
 Adjust the relative `./music` and `./snapcast` directories for your Compose file.
 They resolve relative to that file. Snapserver must share the same host FIFO
 directory and create/read `music-player.fifo`. The image runs as UID/GID 10001;
-give it read access to the library and write access to the FIFO. Prefer a shared
-numeric group with Compose `group_add` and a group-writable FIFO. Do not mount a
-regular file where a FIFO is expected. The sample does not bundle Snapserver.
+give it read access to the library and read/write access to the FIFO. Prefer a
+shared numeric group with Compose `group_add` and a FIFO with group read/write
+permissions. Do not mount a regular file where a FIFO is expected. The sample
+does not bundle Snapserver.
 
 `/data` stores configuration, SQLite, covers and cache; persist it across
 replacements. All of `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and
