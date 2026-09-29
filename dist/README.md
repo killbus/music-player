@@ -151,6 +151,8 @@ explicitly withdraw an unpublished candidate before rebuilding. Never overwrite
 an already distributed version. Orphan staging tags can be removed once no
 published manifest or recovery process needs them.
 
-When changing workflows, follow
-[`github-actions.md`](../.trellis/spec/guides/github-actions.md): fetch each
-Action's current release and docs, record the facts, and pin its commit SHA.
+When changing workflows, fetch each Action's latest stable release, README and
+action metadata from its GitHub repository. Record the repository/release/docs
+URLs, check date and resolved SHA in `.github/action-versions.json`, then pin
+that SHA in the workflow. Recheck the recorded facts with
+`python3 scripts/check-action-versions.py .github/workflows/release.yml`.
