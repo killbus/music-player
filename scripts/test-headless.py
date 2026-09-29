@@ -80,6 +80,7 @@ def main():
                 '-e', 'MUSIC_PLAYER_REMOTE_PLAYER=false', image)
             host = run('docker', 'port', name, '5053/tcp')
             url = 'http://' + host
+            report['http_before_restart'] = url
 
             def graphql(query, variables=None):
                 request = urllib.request.Request(url + '/graphql',
@@ -127,6 +128,9 @@ def main():
             run('docker', 'exec', name, 'sh', '-ec',
                 'printf "\\n# distribution persistence probe\\n" >> /data/config/music-player/settings.toml')
             run('docker', 'restart', name)
+            # Docker may allocate a different ephemeral host port on restart.
+            url = 'http://' + run('docker', 'port', name, '5053/tcp')
+            report['http_after_restart'] = url
             wait_for_library()
             after = run('docker', 'exec', name, 'cat', settings)
             assert before in after and '# distribution persistence probe' in after
@@ -144,6 +148,8 @@ def main():
         suffix = image.replace(':', '-').replace('/', '-')
         (evidence / f'{suffix}.log').write_text(log.stdout + log.stderr)
         (evidence / f'{suffix}.json').write_text(json.dumps(report, indent=2) + '\n')
+        state = subprocess.run(['docker', 'inspect', name], capture_output=True, text=True)
+        (evidence / f'{suffix}-inspect.json').write_text(state.stdout or state.stderr)
         subprocess.run(['docker', 'rm', '-f', name], stdout=subprocess.DEVNULL, check=False)
         subprocess.run(['docker', 'volume', 'rm', volume], stdout=subprocess.DEVNULL, check=False)
 

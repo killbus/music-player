@@ -30,3 +30,11 @@ rendering the RPM spec. Bash expanded the unescaped replacement tilde to HOME,
 which injected slashes into the sed expression. Escape the tilde so development
 and prerelease versions retain a literal RPM prerelease separator. No service
 or container runtime checks ran in this failed attempt.
+
+Second native CI: https://github.com/killbus/music-player/actions/runs/36567622534
+Both architectures passed package byte identity and every DEB service lifecycle
+check, including non-root FIFO PCM. The Ubuntu containers passed first playback
+but the persistence test queried the old ephemeral host port after restart.
+Logs show the HTTP server listening again inside both containers. Re-resolve
+the Docker port after restart and record both endpoints plus container inspect
+data. Container persistence and Fedora RPM tests still require a passing run.
