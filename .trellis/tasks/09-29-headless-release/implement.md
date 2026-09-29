@@ -1,0 +1,25 @@
+# Implementation and validation
+
+1. Record live release/README/action.yml facts for every new workflow Action.
+2. Add CLI package variant and generated dependencies; retain full default.
+3. Add runtime Dockerfile and native clean-install/daemon/FIFO checks.
+4. Consolidate Linux workflow, transfer canonical artifacts and gate publishing.
+5. Run available local syntax/lint/evidence checks; review failure paths and
+   package ownership. Native Linux tests require GitHub CI on both architectures.
+6. Document usage, baseline, conflicts and partial-publication recovery.
+
+Status: implementation prepared on feat/headless-release; native CI pending.
+
+Local checks (2026-09-29): actionlint 1.7.12, ShellCheck 0.11.0, individual Bash
+syntax checks and Python AST parsing passed. Live Action release/SHA/docs audit
+passed for all four Actions. Metadata gates checked development builds, matching
+tag validation, mismatched/invalid tag rejection and missing-tag publication
+rejection. git diff --check passed. No local Linux build or production access.
+
+Added actual native-runner DEB service checks for disabled first install,
+non-root FIFO PCM, persisted configuration, active/stopped upgrades,
+disabled-but-active upgrades, remove/stop and purge/data retention. These and
+both package/container architectures still need real CI evidence.
+
+Iterate with commits on the feature branch; only merge a reviewed passing PR
+with squash. No release publication is authorized by this implementation task.

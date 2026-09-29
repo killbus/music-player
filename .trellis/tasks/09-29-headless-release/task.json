@@ -1,0 +1,9 @@
+{
+  "id": "headless-release",
+  "name": "headless-release",
+  "title": "CLI packages and multi-platform container release",
+  "status": "in_progress",
+  "branch": "feat/headless-release",
+  "base_branch": "master",
+  "scope": "distribution"
+}
