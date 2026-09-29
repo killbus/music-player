@@ -95,7 +95,8 @@ build_deb() {
 
 build_rpm() {
   local rpm_arch=$architecture
-  local rpm_version=${version//-/~}
+  # Keep the RPM prerelease separator literal; unquoted ~ expands to HOME.
+  local rpm_version=${version//-/\~}
   case "$rpm_arch" in
     x86_64|aarch64) ;;
     amd64) rpm_arch=x86_64 ;;

@@ -8,7 +8,7 @@
    package ownership. Native Linux tests require GitHub CI on both architectures.
 6. Document usage, baseline, conflicts and partial-publication recovery.
 
-Status: implementation prepared on feat/headless-release; native CI pending.
+Status: iterating on feat/headless-release after the first native CI failure.
 
 Local checks (2026-09-29): actionlint 1.7.12, ShellCheck 0.11.0, individual Bash
 syntax checks and Python AST parsing passed. Live Action release/SHA/docs audit
@@ -23,3 +23,10 @@ both package/container architectures still need real CI evidence.
 
 Iterate with commits on the feature branch; only merge a reviewed passing PR
 with squash. No release publication is authorized by this implementation task.
+
+First native CI: https://github.com/killbus/music-player/actions/runs/36564859751
+Both architectures built the Web UI, Rust CLI and DEB successfully, then failed
+rendering the RPM spec. Bash expanded the unescaped replacement tilde to HOME,
+which injected slashes into the sed expression. Escape the tilde so development
+and prerelease versions retain a literal RPM prerelease separator. No service
+or container runtime checks ran in this failed attempt.
