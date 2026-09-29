@@ -125,10 +125,10 @@ changing the application directory does not relocate settings/SQLite.
 `MUSIC_PLAYER_AUDIO_OUTPUT` remains configurable. Web UI is on port 5053,
 gRPC on 5051 and WebSocket on 5052. Map the ports you use.
 
-The container starts the daemon directly and contains no music-player service
-unit, DEB maintainer scripts or `/etc/default/music-player`; those belong to the
-DEB service installation. Configure the container with environment variables
-and its persisted settings. The `trixie-slim` tag stays on Debian 13 while
+The container starts the daemon directly. It does not install the music-player
+DEB, its systemd unit or `/etc/default/music-player`. Configure the container
+with environment variables and its persisted settings. The `trixie-slim` tag
+stays on Debian 13 while
 receiving base updates at build time. See the [official image documentation](https://github.com/docker-library/docs/tree/master/debian)
 and [supported tags/architectures](https://github.com/docker-library/official-images/blob/master/library/debian).
 
