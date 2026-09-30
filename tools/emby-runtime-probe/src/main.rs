@@ -61,7 +61,7 @@ fn main() {
     emit(
         start,
         "play_called",
-        json!({"boundary":"tcp-delivery", "generation":session.generation()}),
+        json!({"boundary":"byte-stream-delivery", "generation":session.generation()}),
     );
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
@@ -94,6 +94,17 @@ fn main() {
                 _ => {}
             }
         }
+        let out = player.output_snapshot();
+        emit(
+            start,
+            "output",
+            json!({
+                "nonblocking":out.nonblocking, "generation":out.generation, "epoch":out.epoch,
+                "backpressure_events":out.backpressure_events, "bytes_written":out.bytes_written,
+                "nonzero_bytes_written":out.nonzero_bytes_written,
+                "output_failed":out.output_failed, "writer_exited":out.writer_exited,
+            }),
+        );
         let status = player.status();
         emit(
             start,

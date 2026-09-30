@@ -35,6 +35,9 @@ pub struct StreamSnapshot {
 struct Inner {
     state: Mutex<StreamSnapshot>,
     wake: Box<dyn Fn() + Send + Sync>,
+    // Only explicit cancellation revokes output. Normal reader EOF/drop
+    // must allow already decoded PCM to drain.
+    revoke_output: Box<dyn Fn() + Send + Sync>,
 }
 /// A single generation; never re-used for another source or retry.
 #[derive(Clone)]
@@ -61,6 +64,7 @@ impl StreamSession {
                 state.phase = StreamPhase::Cancelled;
             }
         }
+        (self.0.revoke_output)();
         (self.0.wake)();
     }
     pub(crate) fn set_phase(&self, phase: StreamPhase) {
@@ -97,6 +101,7 @@ impl StreamInput {
         metadata: Metadata,
         generation: u64,
         wake: impl Fn() + Send + Sync + 'static,
+        revoke_output: impl Fn() + Send + Sync + 'static,
     ) -> Self {
         let session = StreamSession(Arc::new(Inner {
             state: Mutex::new(StreamSnapshot {
@@ -109,6 +114,7 @@ impl StreamInput {
                 decoder_status: None,
             }),
             wake: Box::new(wake),
+            revoke_output: Box::new(revoke_output),
         }));
         Self {
             reader: ObservedReader {

@@ -17,6 +17,20 @@ The callback must wake blocked IO and reader destruction must join the host
 transport. Legacy URL handling remains on the upstream path.
 
 This is an experimental integration under tools/emby-runtime-probe. The daemon
-has not adopted it yet. Writer backpressure cancellation, confirmed consumption
-clocks, latest-intent coordination and all real Emby/output acceptance remain
-separate M1b/M2/M6 gates. A successful TCP fixture is not those guarantees.
+has not adopted it yet. FIFO and connected TCP/Unix writers now use nonblocking
+writes. Cancellation revokes unsent PCM under the same gate as each final write;
+partial frame cancellation is zero-padded before subsequent stereo frames.
+Normal reader EOF releases input without revoking buffered output. Direct libc
+use is Unix-only for O_NONBLOCK and FIFO type validation.
+
+The FIFO experiment holds its reader open without consuming and requires actual
+nonzero delivery and WouldBlock before Drop. Output counters include silence and
+describe kernel acceptance, not confirmed receiver consumption. Existing stdout
+remains blocking and is outside the managed cancellation guarantee; socket
+connect/accept during construction is also still blocking. CPAL callback buffers
+already handed to the device and bytes already accepted by a kernel/receiver
+cannot be retracted by clearing the local ring.
+
+Confirmed consumption clocks, latest-intent coordination, multi-generation
+output verification and all real Emby acceptance remain separate M1b/M2/M6 gates.
+A successful TCP/FIFO fixture is not evidence for those guarantees.

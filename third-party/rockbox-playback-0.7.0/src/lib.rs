@@ -857,9 +857,28 @@ struct Shared {
     queue: Mutex<Vec<PathBuf>>,
     managed: Mutex<Option<StreamSession>>,
     next_generation: AtomicU64,
+    // ring also gates revocation and final nonblocking writes.
+    output_generation: AtomicU64,
+    output_epoch: AtomicU64,
+    output_nonblocking: bool,
+    output_backpressure: AtomicU64,
+    output_bytes: AtomicU64,
+    output_nonzero_bytes: AtomicU64,
+    output_failed: AtomicBool,
+    writer_exited: AtomicBool,
 }
 
 impl Shared {
+    fn revoke_output(&self, generation: u64) {
+        let mut ring = self.ring.lock().unwrap();
+        if self.output_generation.load(Ordering::Relaxed) == generation {
+            self.output_generation.store(0, Ordering::Relaxed);
+            self.output_epoch.fetch_add(1, Ordering::Relaxed);
+            self.target_amp.store(0f32.to_bits(), Ordering::Relaxed);
+            ring.clear();
+        }
+    }
+
     fn set_volume_bits(&self, v: f32) {
         self.volume
             .store(v.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
@@ -973,6 +992,20 @@ impl Drop for StreamSink {
     }
 }
 
+/// Byte-stream writer observations, not an audible-consumption clock.
+/// Counters cover the writer lifetime, including silence and alignment padding.
+#[derive(Debug, Clone, Copy)]
+pub struct OutputSnapshot {
+    pub nonblocking: bool,
+    pub generation: u64,
+    pub epoch: u64,
+    pub backpressure_events: u64,
+    pub bytes_written: u64,
+    pub nonzero_bytes_written: u64,
+    pub output_failed: bool,
+    pub writer_exited: bool,
+}
+
 /// The player handle. Cloneable-free but `Send` controls are issued
 /// through it; the output backend lives here and keeps output alive for the
 /// player's lifetime.
@@ -1039,6 +1072,9 @@ impl Player {
     /// Pause/stop/queue replacement cancel this session. Resume/seek require
     /// the host to resolve a new stream at its confirmed absolute checkpoint.
     /// EOF never auto-advances: completion requires evidence outside this API.
+    /// Byte-stream cancellation requires a nonblocking FIFO/socket output.
+    /// Legacy stdout and socket construction are outside that guarantee.
+    /// Data already submitted to a device/receiver cannot be recalled here.
     pub fn play_stream(
         &self,
         reader: Box<dyn std::io::Read + Send>,
@@ -1050,12 +1086,25 @@ impl Player {
         if let Some(old) = active.as_ref() {
             old.cancel();
         }
-        self.shared.ring.lock().unwrap().clear();
-        self.shared
-            .target_amp
-            .store(0f32.to_bits(), Ordering::Relaxed);
         let generation = self.shared.next_generation.fetch_add(1, Ordering::Relaxed);
-        let input = managed::StreamInput::new(reader, format_ext, metadata, generation, wake);
+        {
+            let mut ring = self.shared.ring.lock().unwrap();
+            ring.clear();
+            self.shared
+                .target_amp
+                .store(0f32.to_bits(), Ordering::Relaxed);
+            self.shared
+                .output_generation
+                .store(generation, Ordering::Relaxed);
+            self.shared.output_epoch.fetch_add(1, Ordering::Relaxed);
+        }
+        let weak = Arc::downgrade(&self.shared);
+        let input =
+            managed::StreamInput::new(reader, format_ext, metadata, generation, wake, move || {
+                if let Some(shared) = weak.upgrade() {
+                    shared.revoke_output(generation);
+                }
+            });
         let session = input.session.clone();
         *active = Some(session.clone());
         let _ = self.tx.send(Command::OpenStream(input));
@@ -1068,12 +1117,23 @@ impl Player {
         let mut active = self.shared.managed.lock().unwrap();
         if let Some(session) = active.take() {
             session.cancel();
-            self.shared
-                .target_amp
-                .store(0f32.to_bits(), Ordering::Relaxed);
-            self.shared.ring.lock().unwrap().clear();
         }
         let _ = self.tx.send(command);
+    }
+
+    /// Byte acceptance is not receiver consumption. CPAL is not counted here.
+    pub fn output_snapshot(&self) -> OutputSnapshot {
+        let _gate = self.shared.ring.lock().unwrap();
+        OutputSnapshot {
+            nonblocking: self.shared.output_nonblocking,
+            generation: self.shared.output_generation.load(Ordering::Relaxed),
+            epoch: self.shared.output_epoch.load(Ordering::Relaxed),
+            backpressure_events: self.shared.output_backpressure.load(Ordering::Relaxed),
+            bytes_written: self.shared.output_bytes.load(Ordering::Relaxed),
+            nonzero_bytes_written: self.shared.output_nonzero_bytes.load(Ordering::Relaxed),
+            output_failed: self.shared.output_failed.load(Ordering::Relaxed),
+            writer_exited: self.shared.writer_exited.load(Ordering::Relaxed),
+        }
     }
 
     /// The output sample rate everything is resampled to.
@@ -1516,6 +1576,17 @@ fn make_shared(config: &PlayerConfig, rate: u32) -> Arc<Shared> {
         queue: Mutex::new(Vec::new()),
         managed: Mutex::new(None),
         next_generation: AtomicU64::new(1),
+        output_generation: AtomicU64::new(0),
+        output_epoch: AtomicU64::new(0),
+        output_nonblocking: matches!(
+            config.output,
+            OutputConfig::Fifo(_) | OutputConfig::Unix { .. } | OutputConfig::Tcp { .. }
+        ),
+        output_backpressure: AtomicU64::new(0),
+        output_bytes: AtomicU64::new(0),
+        output_nonzero_bytes: AtomicU64::new(0),
+        output_failed: AtomicBool::new(false),
+        writer_exited: AtomicBool::new(false),
     })
 }
 
@@ -1588,8 +1659,16 @@ fn spawn_stream_writer(
             let alpha = LevelMeter::alpha(rate);
             let band_alphas = LevelMeter::band_alphas(rate);
             let mut next = Instant::now() + frame_dur;
+            let mut last_epoch = 0;
+            let mut wire_offset = 0usize;
 
             while !stop_thread.load(Ordering::Relaxed) {
+                let mut ring = shared.ring.lock().unwrap();
+                let epoch = shared.output_epoch.load(Ordering::Relaxed);
+                if epoch != last_epoch {
+                    cur_amp = 0.0;
+                    last_epoch = epoch;
+                }
                 let target = f32::from_bits(shared.target_amp.load(Ordering::Relaxed));
                 let gain_l = f32::from_bits(shared.balance_gain_l.load(Ordering::Relaxed));
                 let gain_r = f32::from_bits(shared.balance_gain_r.load(Ordering::Relaxed));
@@ -1598,7 +1677,6 @@ fn spawn_stream_writer(
                     // Paused/stopped: emit silence, freeze the ring.
                     buf.iter_mut().for_each(|b| *b = 0);
                 } else {
-                    let mut ring = shared.ring.lock().unwrap();
                     for frame in buf.chunks_mut(4) {
                         if cur_amp < target {
                             cur_amp = (cur_amp + step).min(target);
@@ -1626,14 +1704,33 @@ fn spawn_stream_writer(
                             (lv as f32 + rv as f32) / (2.0 * 32768.0),
                         );
                     }
-                    drop(ring);
                     shared.set_levels(meter.take());
                 }
+                drop(ring);
 
-                // A write/flush error means the consumer went away (pipe
-                // closed, socket reset): stop cleanly rather than spin.
-                if writer.write_all(&buf).is_err() || writer.flush().is_err() {
-                    break;
+                if shared.output_nonblocking {
+                    match write_output_chunk(
+                        &mut *writer,
+                        &buf,
+                        epoch,
+                        &shared,
+                        &stop_thread,
+                        &mut wire_offset,
+                    ) {
+                        Ok(true) => {}
+                        Ok(false) => continue, // revoked: discard unsent bytes
+                        Err(_) => {
+                            shared.output_failed.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                } else {
+                    // Legacy stdout may block. Never hold the generation gate
+                    // around it or advertise cancellable output for this path.
+                    if writer.write_all(&buf).is_err() || writer.flush().is_err() {
+                        shared.output_failed.store(true, Ordering::Relaxed);
+                        break;
+                    }
                 }
 
                 // Pace to real time. If we fell behind (scheduling hiccup),
@@ -1648,6 +1745,7 @@ fn spawn_stream_writer(
                     next = now + frame_dur;
                 }
             }
+            shared.writer_exited.store(true, Ordering::Relaxed);
         })
         .expect("spawn output writer thread");
 
@@ -1655,6 +1753,61 @@ fn spawn_stream_writer(
         stop,
         thread: Some(thread),
     }
+}
+
+// Every final write is nonblocking and serialized with generation revocation.
+// Bytes already accepted by the kernel cannot be recalled. Preserve S16LE
+// stereo framing if cancellation lands in the middle of a partial frame.
+fn write_output_chunk(
+    writer: &mut dyn Write,
+    pcm: &[u8],
+    epoch: u64,
+    shared: &Shared,
+    stop: &AtomicBool,
+    wire_offset: &mut usize,
+) -> std::io::Result<bool> {
+    let mut pending = vec![0; (4 - *wire_offset) % 4];
+    pending.extend_from_slice(pcm);
+    let mut offset = 0;
+    while offset < pending.len() {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
+        let result = {
+            let _gate = shared.ring.lock().unwrap();
+            if shared.output_epoch.load(Ordering::Relaxed) != epoch {
+                return Ok(false);
+            }
+            let result = writer.write(&pending[offset..]);
+            if let Ok(count) = result {
+                shared
+                    .output_bytes
+                    .fetch_add(count as u64, Ordering::Relaxed);
+                shared.output_nonzero_bytes.fetch_add(
+                    pending[offset..offset + count]
+                        .iter()
+                        .filter(|b| **b != 0)
+                        .count() as u64,
+                    Ordering::Relaxed,
+                );
+            }
+            result
+        };
+        match result {
+            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(count) => {
+                offset += count;
+                *wire_offset = (*wire_offset + count) % 4;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                shared.output_backpressure.fetch_add(1, Ordering::Relaxed);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(true)
 }
 
 /// Build the cpal output stream: drains the ring buffer, converts i16 →
@@ -1780,11 +1933,18 @@ fn build_stream(
     let alpha = LevelMeter::alpha(rate);
     let band_alphas = LevelMeter::band_alphas(rate);
 
+    let mut last_epoch = 0;
     let err_fn = |e| eprintln!("rockbox-playback: output stream error: {e}");
     let stream = device
         .build_output_stream(
             &config,
             move |data: &mut [f32], _| {
+                let mut ring = shared.ring.lock().unwrap();
+                let epoch = shared.output_epoch.load(Ordering::Relaxed);
+                if epoch != last_epoch {
+                    cur_amp = 0.0;
+                    last_epoch = epoch;
+                }
                 let target = f32::from_bits(shared.target_amp.load(Ordering::Relaxed));
                 let gain_l = f32::from_bits(shared.balance_gain_l.load(Ordering::Relaxed));
                 let gain_r = f32::from_bits(shared.balance_gain_r.load(Ordering::Relaxed));
@@ -1798,7 +1958,6 @@ fn build_stream(
                     shared.set_levels(Levels::default());
                     return;
                 }
-                let mut ring = shared.ring.lock().unwrap();
                 for frame in data.chunks_mut(2) {
                     if cur_amp < target {
                         cur_amp = (cur_amp + step).min(target);
@@ -2250,6 +2409,10 @@ impl Engine {
                 std::thread::sleep(Duration::from_millis(15));
             }
             let mut ring = self.shared.ring.lock().unwrap();
+            // Recheck under the gate: cancellation can race the check above.
+            if self.shared.output_generation.load(Ordering::Relaxed) != generation.unwrap_or(0) {
+                return;
+            }
             let space = cap.saturating_sub(ring.len());
             let end = (pos + space).min(pcm.len());
             ring.extend(&pcm[pos..end]);
@@ -2611,9 +2774,15 @@ impl Engine {
                 self.install_decoder(dec, false);
                 self.shared.index.store(usize::MAX, Ordering::Relaxed);
                 self.playing = true;
-                self.shared
-                    .target_amp
-                    .store(self.shared.volume_f32().to_bits(), Ordering::Relaxed);
+                {
+                    let _gate = self.shared.ring.lock().unwrap();
+                    if self.shared.output_generation.load(Ordering::Relaxed) == session.generation()
+                    {
+                        self.shared
+                            .target_amp
+                            .store(self.shared.volume_f32().to_bits(), Ordering::Relaxed);
+                    }
+                }
                 session.set_phase(StreamPhase::Decoding);
             }
             Ok(dec) => {

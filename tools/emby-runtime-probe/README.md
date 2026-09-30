@@ -16,8 +16,12 @@ compiler environment and summaries. Only synthetic loopback credentials are used
 No private server is reached by CI. The transport owns bounded memory and never
 materializes a media file. HTTP content length does not grant random access.
 
-These are input/codec gates. The output writer is still upstream and a blocked
-consumer can still block it. TCP delivery, decoder elapsed time and ring drain
-are not proof of audible consumption. No automatic media completion is claimed;
+The FIFO output experiment keeps a real read descriptor open without reading.
+It waits for nonzero PCM delivery and actual writer backpressure, then requests
+Player Drop. The two-second cancellation threshold is measured from the child's
+pre-call event through its completed Drop event; five seconds is failure cleanup.
+Raw evidence is retained in results/output-fifo.json. This checks an opened FIFO
+writer, not blocking socket construction, stdout, CPAL, or receiver consumption.
+TCP delivery, decoder elapsed time and ring drain are not proof of audible consumption. No automatic media completion is claimed;
 short clean decoder EOF retains position as EndUnconfirmed. ServerOffset resume
 requires a future host resolver to supply a fresh pinned stream and checkpoint.
