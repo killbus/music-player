@@ -99,8 +99,8 @@ jobs:
       - name: Verify public Player replacement and stale cancellation
         timeout-minutes: 2
         run: python3 "$PROBE_DIR/replacement.py" | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Run FIFO backpressure and Drop experiment
-        timeout-minutes: 1
+      - name: Verify FIFO and socket backpressure cancellation
+        timeout-minutes: 3
         run: python3 "$PROBE_DIR/output.py" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Run bounded loopback experiments
         timeout-minutes: 5

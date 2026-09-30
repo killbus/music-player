@@ -16,12 +16,17 @@ compiler environment and summaries. Only synthetic loopback credentials are used
 No private server is reached by CI. The transport owns bounded memory and never
 materializes a media file. HTTP content length does not grant random access.
 
-The FIFO output experiment keeps a real read descriptor open without reading.
-It waits for nonzero PCM delivery and actual writer backpressure, then requests
-Player Drop. The two-second cancellation threshold is measured from the child's
-pre-call event through its completed Drop event; five seconds is failure cleanup.
-Raw evidence is retained in results/output-fifo.json. This checks an opened FIFO
-writer, not blocking socket construction, stdout, CPAL, or receiver consumption.
+The output experiments keep real FIFO, TCP and Unix receivers open without
+reading. Socket receivers listen with a small receive buffer; Player connects.
+Each case requires nonzero PCM, actual WouldBlock and at least 300 ms of frozen
+media/byte counters with increasing backpressure before requesting Drop. The
+receiver descriptor remains open through process exit, including failure cleanup.
+Drop, resource release and observed process exit each have a two-second gate;
+the five-second watchdog only cleans up failures. All three cases run even if
+one fails. Raw events, descriptor lifetime, hashes and the shared 120-second MP3
+are retained in results/output-{fifo,tcp,unix}.json and tone-output-120s.mp3.
+This checks connected/opened output, not blocking socket construction, stdout,
+CPAL or receiver consumption.
 TCP delivery, decoder elapsed time and ring drain are not proof of audible consumption. No automatic media completion is claimed;
 short clean decoder EOF retains position as EndUnconfirmed. ServerOffset resume
 requires a future host resolver to supply a fresh pinned stream and checkpoint.
