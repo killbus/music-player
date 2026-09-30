@@ -37,7 +37,16 @@ if [ "$1" = configure ]; then
         systemctl daemon-reload
         # Preserve both administrator choices: enabled state and running state.
         if [ "$restart_dynamic" = yes ]; then
-            deb-systemd-invoke start music-player.service
+            # Restore a previously running instance without enabling it.
+            policy_status=0
+            if [ -x /usr/sbin/policy-rc.d ]; then
+                /usr/sbin/policy-rc.d music-player.service start || policy_status=$?
+            fi
+            case "$policy_status" in
+                0|104) systemctl start music-player.service ;;
+                101) : ;;
+                *) echo "Service start policy failed: $policy_status" >&2; exit "$policy_status" ;;
+            esac
         elif systemctl --quiet is-active music-player.service; then
             deb-systemd-invoke restart music-player.service
         fi

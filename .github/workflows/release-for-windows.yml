@@ -37,11 +37,14 @@ jobs:
         run: |
           choco install protoc -y
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          rustup toolchain install 1.98.0 --profile minimal
+          rustup toolchain install 1.98.0-x86_64-pc-windows-gnu --profile minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          rustup default 1.98.0
-      # No static DuckDB is published for an MSVC target, so Windows links the
-      # shared library instead. Setting these in the environment overrides the
+          rustup default 1.98.0-x86_64-pc-windows-gnu
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          gcc -dumpmachine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # Windows uses the upstream shared DuckDB C API library.
+      # Setting these in the environment overrides the
       # static defaults in .cargo/config.toml, which exist for the platforms
       # that do have one.
       - name: Vendor DuckDB (shared)
@@ -71,23 +74,29 @@ jobs:
         run: cargo test --locked -p rockbox-playback --lib replaygain_c_long_preserves_values_and_saturates
 
       - name: Build CLI
-        run: cargo build --locked --release -p music-player --target x86_64-pc-windows-msvc
+        run: cargo build --locked --release -p music-player --target x86_64-pc-windows-gnu
 
       - name: Package and verify CLI
         run: |
-          $binaryDir = 'target/x86_64-pc-windows-msvc/release'
+          $binaryDir = 'target/x86_64-pc-windows-gnu/release'
           Copy-Item vendor/duckdb/lib/duckdb.dll $binaryDir
+          $gccDir = Split-Path (Get-Command gcc).Source
+          foreach ($dll in @('libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll')) {
+            $runtime = Join-Path $gccDir $dll
+            if (Test-Path $runtime) { Copy-Item $runtime $binaryDir }
+          }
           & "$binaryDir/music-player.exe" --help
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $asset = "music-player_$env:RELEASE_VERSION`_x86_64-pc-windows-msvc.tar.gz"
-          tar -czf $asset -C $binaryDir music-player.exe duckdb.dll
+          $asset = "music-player_$env:RELEASE_VERSION`_x86_64-pc-windows-gnu.tar.gz"
+          $payload = @('music-player.exe') + @(Get-ChildItem $binaryDir -Filter *.dll | ForEach-Object { $_.Name })
+          tar -czf $asset -C $binaryDir @payload
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $smokeDir = Join-Path $env:RUNNER_TEMP 'music-player-archive-smoke'
           New-Item -ItemType Directory -Force $smokeDir | Out-Null
           tar -xzf $asset -C $smokeDir
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $buildPath = $env:PATH
-          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notlike "$env:GITHUB_WORKSPACE*" }) -join ';'
+          $env:PATH = "$env:SystemRoot/System32;$env:SystemRoot"
           Push-Location $smokeDir
           try {
             & ./music-player.exe --help
