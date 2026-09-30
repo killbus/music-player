@@ -37,6 +37,8 @@
 pub mod adaptive;
 mod crossfade;
 pub mod m3u;
+mod managed;
+pub use managed::{StreamPhase, StreamReadEnd, StreamSession, StreamSnapshot};
 pub mod output;
 mod resume;
 pub mod source;
@@ -757,6 +759,7 @@ impl PlayerConfigBuilder {
 }
 
 enum Command {
+    OpenStream(managed::StreamInput),
     SetQueue(Vec<PathBuf>),
     Enqueue(PathBuf),
     /// Insert one or more tracks at a Rockbox insertion position.
@@ -852,6 +855,8 @@ struct Shared {
     /// Mirror of the engine's queue so the handle can read it (for
     /// `queue()` / `export_m3u`) without a round-trip to the engine thread.
     queue: Mutex<Vec<PathBuf>>,
+    managed: Mutex<Option<StreamSession>>,
+    next_generation: AtomicU64,
 }
 
 impl Shared {
@@ -1028,6 +1033,49 @@ impl Player {
         Ok(assemble(config, rate, shared, OutputHandle::Stream(sink)))
     }
 
+    /// Start one forward-only, host-owned stream. No URL or credentials enter
+    /// the persisted queue. The host must supply an idempotent, nonblocking
+    /// wake callback that cancels every blocked read and joins on reader drop.
+    /// Pause/stop/queue replacement cancel this session. Resume/seek require
+    /// the host to resolve a new stream at its confirmed absolute checkpoint.
+    /// EOF never auto-advances: completion requires evidence outside this API.
+    pub fn play_stream(
+        &self,
+        reader: Box<dyn std::io::Read + Send>,
+        format_ext: String,
+        metadata: Metadata,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> StreamSession {
+        let mut active = self.shared.managed.lock().unwrap();
+        if let Some(old) = active.as_ref() {
+            old.cancel();
+        }
+        self.shared.ring.lock().unwrap().clear();
+        self.shared
+            .target_amp
+            .store(0f32.to_bits(), Ordering::Relaxed);
+        let generation = self.shared.next_generation.fetch_add(1, Ordering::Relaxed);
+        let input = managed::StreamInput::new(reader, format_ext, metadata, generation, wake);
+        let session = input.session.clone();
+        *active = Some(session.clone());
+        let _ = self.tx.send(Command::OpenStream(input));
+        session
+    }
+
+    // Serialize invalidation with registration so a stop cannot miss a
+    // queued-but-not-yet-opened stream. Never wait for network IO here.
+    fn send_invalidating(&self, command: Command) {
+        let mut active = self.shared.managed.lock().unwrap();
+        if let Some(session) = active.take() {
+            session.cancel();
+            self.shared
+                .target_amp
+                .store(0f32.to_bits(), Ordering::Relaxed);
+            self.shared.ring.lock().unwrap().clear();
+        }
+        let _ = self.tx.send(command);
+    }
+
     /// The output sample rate everything is resampled to.
     pub fn sample_rate(&self) -> u32 {
         self.shared.output_rate.load(Ordering::Relaxed)
@@ -1044,7 +1092,7 @@ impl Player {
         P: Into<PathBuf>,
     {
         let v: Vec<PathBuf> = tracks.into_iter().map(Into::into).collect();
-        let _ = self.tx.send(Command::SetQueue(v));
+        self.send_invalidating(Command::SetQueue(v));
     }
 
     /// Append one track to the end of the queue. The track may be a **local
@@ -1148,7 +1196,7 @@ impl Player {
     /// Empty the queue and stop playback. Also clears any saved resume state
     /// so the next launch starts fresh.
     pub fn clear_queue(&self) {
-        let _ = self.tx.send(Command::Clear);
+        self.send_invalidating(Command::Clear);
     }
 
     // ---- resume (auto-persist / restore) --------------------------------
@@ -1167,7 +1215,7 @@ impl Player {
     pub fn resume(&self) -> Option<ResumeState> {
         let path = self.resume_file.as_ref()?;
         let state = resume::load(path)?;
-        let _ = self.tx.send(Command::Resume(state.clone()));
+        self.send_invalidating(Command::Resume(state.clone()));
         Some(state)
     }
 
@@ -1221,26 +1269,26 @@ impl Player {
         let _ = self.tx.send(Command::Play);
     }
     pub fn pause(&self) {
-        let _ = self.tx.send(Command::Pause);
+        self.send_invalidating(Command::Pause);
     }
     /// Toggle play/pause.
     pub fn toggle(&self) {
-        let _ = self.tx.send(Command::Toggle);
+        self.send_invalidating(Command::Toggle);
     }
     pub fn stop(&self) {
-        let _ = self.tx.send(Command::Stop);
+        self.send_invalidating(Command::Stop);
     }
     /// Skip to the next track (honours the crossfade manual-skip mode).
     pub fn next(&self) {
-        let _ = self.tx.send(Command::Next);
+        self.send_invalidating(Command::Next);
     }
     /// Skip to the previous track.
     pub fn previous(&self) {
-        let _ = self.tx.send(Command::Previous);
+        self.send_invalidating(Command::Previous);
     }
     /// Jump to a specific queue index.
     pub fn skip_to(&self, index: usize) {
-        let _ = self.tx.send(Command::SkipTo(index));
+        self.send_invalidating(Command::SkipTo(index));
     }
     /// Seek within the current track.
     pub fn seek(&self, pos: Duration) {
@@ -1433,7 +1481,7 @@ impl Player {
 
 impl Drop for Player {
     fn drop(&mut self) {
-        let _ = self.tx.send(Command::Shutdown);
+        self.send_invalidating(Command::Shutdown);
         if let Some(e) = self.engine.take() {
             let _ = e.join();
         }
@@ -1466,6 +1514,8 @@ fn make_shared(config: &PlayerConfig, rate: u32) -> Arc<Shared> {
         meta: Mutex::new(None),
         dsp: Mutex::new(config.dsp.clone()),
         queue: Mutex::new(Vec::new()),
+        managed: Mutex::new(None),
+        next_generation: AtomicU64::new(1),
     })
 }
 
@@ -1857,6 +1907,7 @@ struct Engine {
     /// its decoder is open. Dropped — and the temp file deleted — when the
     /// track is reset. Boxed as `Any` so the field needn't be `cfg`-gated.
     current_source: Option<Box<dyn std::any::Any + Send>>,
+    managed: Option<StreamSession>,
     /// Live-radio (ICY) metadata for the current stream, if any: the station
     /// base metadata plus a handle to the changing `StreamTitle`.
     #[cfg(feature = "http")]
@@ -1906,6 +1957,7 @@ impl Engine {
             pending_seek: None,
             last_save: Instant::now(),
             current_source: None,
+            managed: None,
             #[cfg(feature = "http")]
             current_icy: None,
         }
@@ -1921,6 +1973,32 @@ impl Engine {
             // Drain pending commands; returns false on Shutdown.
             if !self.pump_commands(false) {
                 break;
+            }
+
+            if self
+                .managed
+                .as_ref()
+                .is_some_and(StreamSession::is_cancelled)
+            {
+                self.reset_current();
+                self.playing = false;
+                self.set_state(ST_STOPPED);
+            }
+            // Retain ended managed streams and position; no auto-advance.
+            if self.managed.is_some() && self.decoder.is_none() {
+                if self.shared.ring_frames() == 0 {
+                    self.set_state(ST_STOPPED);
+                }
+                match self.rx.recv_timeout(Duration::from_millis(25)) {
+                    Ok(cmd) => {
+                        if !self.handle(cmd) {
+                            break;
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(_) => {}
+                }
+                continue;
             }
 
             // Paused: keep the decoder and buffered audio; idle until a
@@ -1962,7 +2040,7 @@ impl Engine {
                 continue;
             }
 
-            if !self.playing || self.queue.is_empty() {
+            if !self.playing || (self.queue.is_empty() && self.managed.is_none()) {
                 self.set_state(ST_STOPPED);
                 // Idle: block until a command arrives.
                 match self.rx.recv() {
@@ -2006,7 +2084,7 @@ impl Engine {
     /// or trigger a crossfade near the track's end.
     fn decode_step(&mut self) {
         // Near-end crossfade detection (auto skip).
-        if self.should_start_crossfade() {
+        if self.managed.is_none() && self.should_start_crossfade() {
             self.crossfade_to_next(true);
             return;
         }
@@ -2014,6 +2092,14 @@ impl Engine {
         let chunk = match self.next_output_chunk() {
             Some(c) => c,
             None => {
+                if let Some(session) = self.managed.clone() {
+                    let code = self.decoder.as_ref().and_then(Decoder::status);
+                    session.decoder_ended(code);
+                    drop(self.decoder.take());
+                    session.decoder_joined();
+                    self.playing = false;
+                    return;
+                }
                 // End of track — advance (auto). Ring keeps this track's
                 // buffered tail so playback is gapless.
                 self.dsp.flush();
@@ -2137,6 +2223,7 @@ impl Engine {
     /// Push frames to the ring, sleeping while it is full but staying
     /// responsive to commands.
     fn push_frames(&mut self, pcm: &[i16]) {
+        let generation = self.managed.as_ref().map(StreamSession::generation);
         let cap = self.cfg.buffer_frames * 2;
         let mut pos = 0;
         while pos < pcm.len() {
@@ -2146,7 +2233,14 @@ impl Engine {
                 if !self.pump_commands(true) {
                     return; // shutdown
                 }
-                if !self.playing || self.decoder.is_none() {
+                if generation != self.managed.as_ref().map(StreamSession::generation)
+                    || self
+                        .managed
+                        .as_ref()
+                        .is_some_and(StreamSession::is_cancelled)
+                    || !self.playing
+                    || self.decoder.is_none()
+                {
                     return; // stopped / seeked / skipped — drop stale audio
                 }
                 let len = self.shared.ring.lock().unwrap().len();
@@ -2179,6 +2273,9 @@ impl Engine {
     /// Returns false on Shutdown.
     fn handle(&mut self, cmd: Command) -> bool {
         match cmd {
+            Command::OpenStream(input) => {
+                self.open_managed(input);
+            }
             Command::Shutdown => {
                 // Persist the exact position on exit, like Rockbox saves on
                 // power-off — but only mid-session (a finished queue already
@@ -2186,6 +2283,7 @@ impl Engine {
                 if self.playing || self.paused {
                     self.save_resume();
                 }
+                self.reset_current();
                 self.shutdown = true;
                 return false;
             }
@@ -2220,6 +2318,9 @@ impl Engine {
             }
             Command::SaveResume => self.save_resume(),
             Command::Play => {
+                if self.managed.is_some() {
+                    return true;
+                }
                 if self.queue.is_empty() {
                     return true;
                 }
@@ -2466,6 +2567,9 @@ impl Engine {
     }
 
     fn seek(&mut self, pos: Duration) {
+        if self.managed.is_some() {
+            return;
+        }
         if let Some(dec) = self.decoder.as_mut() {
             dec.seek(pos);
             self.decoded_us = pos.as_micros() as u64;
@@ -2479,6 +2583,49 @@ impl Engine {
     }
 
     // ---- queue / decoder helpers ----------------------------------------
+
+    fn open_managed(&mut self, input: managed::StreamInput) {
+        self.reset_current();
+        self.queue.clear();
+        self.sync_queue();
+        self.index = 0;
+        self.pending_seek = None;
+        self.finishing = false;
+        self.paused = false;
+        let session = input.session.clone();
+        self.managed = Some(session.clone());
+        if session.is_cancelled() {
+            drop(input);
+            session.decoder_joined();
+            return;
+        }
+        session.set_phase(StreamPhase::Opening);
+        let managed::StreamInput {
+            reader,
+            format_ext,
+            metadata,
+            ..
+        } = input;
+        match Decoder::open_stream(Box::new(reader), &format_ext, metadata) {
+            Ok(dec) if !session.is_cancelled() => {
+                self.install_decoder(dec, false);
+                self.shared.index.store(usize::MAX, Ordering::Relaxed);
+                self.playing = true;
+                self.shared
+                    .target_amp
+                    .store(self.shared.volume_f32().to_bits(), Ordering::Relaxed);
+                session.set_phase(StreamPhase::Decoding);
+            }
+            Ok(dec) => {
+                drop(dec);
+                session.decoder_joined();
+            }
+            Err(_) => {
+                session.set_phase(StreamPhase::Failed);
+                session.decoder_joined();
+            }
+        }
+    }
 
     fn open_current(&mut self) -> bool {
         let Some(path) = self.queue.get(self.index).cloned() else {
@@ -2654,6 +2801,18 @@ impl Engine {
     }
 
     fn reset_current(&mut self) {
+        if let Some(session) = self.managed.take() {
+            session.cancel();
+            drop(self.decoder.take());
+            session.decoder_joined();
+            let mut active = self.shared.managed.lock().unwrap();
+            if active
+                .as_ref()
+                .is_some_and(|s| s.generation() == session.generation())
+            {
+                *active = None;
+            }
+        }
         self.decoder = None;
         self.decoded_us = 0;
         self.current_source = None; // drop any HTTP temp cache
