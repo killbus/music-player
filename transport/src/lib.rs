@@ -1,5 +1,6 @@
 //! Cancellable HTTP body -> bounded synchronous reader bridge.
-//! No media files, retries, redirects, or whole-response timeout.
+//! No media files, retries, or whole-response timeout. Redirects are followed
+//! by default, retaining caller-supplied headers across the chain.
 use std::io::{self, Read};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -12,6 +13,10 @@ use tokio::sync::{mpsc, watch};
 pub struct HttpRequest {
     pub url: String,
     pub headers: reqwest::header::HeaderMap,
+    /// Follow HTTP redirects, retaining request headers including credentials.
+    /// Defaults to true; false returns the original redirect status unchanged.
+    /// At most ten hops share the single header timeout and cancellation scope.
+    pub follow_redirects: bool,
     pub connect_timeout: Duration,
     pub header_timeout: Duration,
     pub read_timeout: Duration,
@@ -21,6 +26,7 @@ impl HttpRequest {
         Self {
             url,
             headers: Default::default(),
+            follow_redirects: true,
             connect_timeout: Duration::from_secs(10),
             header_timeout: Duration::from_secs(15),
             read_timeout: Duration::from_secs(30),
@@ -33,6 +39,8 @@ pub enum TransportTerminal {
     Eof,
     Cancelled,
     HttpStatus(u16),
+    RedirectLimit,
+    InvalidRedirect,
     HeaderTimeout,
     ReadTimeout,
     NetworkError,
@@ -74,9 +82,7 @@ pub struct HttpReader {
 impl HttpReader {
     pub fn start(request: HttpRequest) -> io::Result<(Self, TransportHandle)> {
         let url = reqwest::Url::parse(&request.url).map_err(|_| invalid())?;
-        if !matches!(url.scheme(), "http" | "https")
-            || !url.username().is_empty()
-            || url.password().is_some()
+        if !is_media_url(&url)
             || request.connect_timeout.is_zero()
             || request.header_timeout.is_zero()
             || request.read_timeout.is_zero()
@@ -123,6 +129,12 @@ impl HttpReader {
         ))
     }
 }
+fn is_media_url(url: &reqwest::Url) -> bool {
+    matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+}
 fn invalid() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, "invalid media HTTP request")
 }
@@ -134,6 +146,52 @@ async fn cancelled(rx: &mut watch::Receiver<bool>) {
         if rx.changed().await.is_err() {
             return;
         }
+    }
+}
+async fn open(
+    request: &HttpRequest,
+    client: &reqwest::Client,
+    mut url: reqwest::Url,
+) -> Result<reqwest::Response, TransportTerminal> {
+    let mut hops = 0;
+    loop {
+        let mut headers = request.headers.clone();
+        if hops > 0 {
+            // Derive Host from the new URL; all end-to-end headers, including
+            // credentials, keep their original values across origins.
+            headers.remove(reqwest::header::HOST);
+        }
+        let response = client
+            .get(url.clone())
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|_| TransportTerminal::NetworkError)?;
+        if !request.follow_redirects
+            || !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308)
+        {
+            return Ok(response);
+        }
+        if hops >= 10 {
+            return Err(TransportTerminal::RedirectLimit);
+        }
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty())
+            .ok_or(TransportTerminal::InvalidRedirect)?;
+        let next = url
+            .join(location)
+            .map_err(|_| TransportTerminal::InvalidRedirect)?;
+        if !is_media_url(&next) {
+            return Err(TransportTerminal::InvalidRedirect);
+        }
+        // Only the final response is audio. Location carries its own query;
+        // do not append original query parameters to a signed destination.
+        drop(response);
+        url = next;
+        hops += 1;
     }
 }
 async fn download(
@@ -154,9 +212,10 @@ async fn download(
     let mut response = tokio::select! {
         biased;
         _=cancelled(&mut cancel)=>return TransportTerminal::Cancelled,
-        result=tokio::time::timeout(request.header_timeout,client.get(url).headers(request.headers).send())=>match result {
+        // The deadline includes all redirects, not a fresh timeout per hop.
+        result=tokio::time::timeout(request.header_timeout,open(&request, &client, url))=>match result {
             Err(_)=>return TransportTerminal::HeaderTimeout,
-            Ok(Err(_))=>return TransportTerminal::NetworkError,
+            Ok(Err(terminal))=>return terminal,
             Ok(Ok(r))=>r,
         }
     };
@@ -210,6 +269,13 @@ impl Read for HttpReader {
                         TransportTerminal::HeaderTimeout | TransportTerminal::ReadTimeout => Err(
                             io::Error::new(io::ErrorKind::TimedOut, "media transport stalled"),
                         ),
+                        TransportTerminal::RedirectLimit => {
+                            Err(io::Error::other("media redirect limit exceeded"))
+                        }
+                        TransportTerminal::InvalidRedirect => Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "invalid media redirect",
+                        )),
                         TransportTerminal::HttpStatus(_) => Err(io::Error::new(
                             io::ErrorKind::PermissionDenied,
                             "media HTTP status rejected",

@@ -45,7 +45,7 @@ fn main() {
     })
     .unwrap();
     let mut request = HttpRequest::new(args[1].clone());
-    if args[1].contains("header_positive") {
+    if args[1].contains("header_positive") || args[1].ends_with("/redirect.mp3") {
         request
             .headers
             .insert("X-Fixture-Auth", "synthetic-sentinel".parse().unwrap());

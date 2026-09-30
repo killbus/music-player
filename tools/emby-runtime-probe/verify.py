@@ -41,23 +41,28 @@ for name, summary in cases.items():
     assert 0 <= latency <= 2000, (name, latency)
     assert summary["cancel_join_ms"] == latency and summary["internal_cancel_gate"] == "Pass"
     assert summary["drop_joined"] and summary["drop_join_after_stop_ms"] == joined["ms"] - stop["ms"]
-    assert summary["request_count"] == len(raw["requests"]) == 1, name
+    assert summary["request_count"] == len(raw["requests"]) == (2 if name == "redirect" else 1), name
     assert all(r["range"] is None for r in raw["requests"]), name
     pcm = sum(e["nonzero_bytes"] for e in raw["pcm"])
     assert pcm == summary["nonzero_pcm_bytes"]
-    if name in {"finite_no_range", "chunked", "header_positive", "body_stall", "body_stall_pause", "short_eof", "truncated_body"}:
+    if name in {"finite_no_range", "chunked", "header_positive", "body_stall", "body_stall_pause", "short_eof", "truncated_body", "redirect"}:
         assert pcm > 4096, (name, "missing real audio")
         assert summary["first_nonzero_pcm_ms"] < 2000, name
     else:
         assert pcm == 0, (name, "unexpected audio")
+    if name == "redirect":
+        assert [r["path"] for r in raw["requests"]] == ["/redirect.mp3", "/finite_no_range.mp3"]
+        assert all(r["test_header_present"] for r in raw["requests"]), "same-origin auth lost"
+        assert sum(e["event"] == "redirect_sent" for e in raw["fixture_events"]) == 1
+        assert not any(e["detail"]["phase"] == "Failed" for e in sessions), "redirect failed"
     if name == "header_positive":
         assert raw["requests"][0]["test_header_present"]
     if name == "header_required":
         assert not raw["requests"][0]["test_header_present"]
         assert any(e["detail"]["transport_terminal"] == "HttpStatus(401)" for e in sessions)
         assert any(e["detail"]["phase"] == "Failed" for e in sessions)
-    if name in {"redirect", "partial_content", "truncated_body"}:
-        expected = {"redirect": "HttpStatus(302)", "partial_content": "HttpStatus(206)",
+    if name in {"partial_content", "truncated_body"}:
+        expected = {"partial_content": "HttpStatus(206)",
                     "truncated_body": "NetworkError"}[name]
         before = [e["detail"] for e in sessions if e["ms"] < stop["ms"]]
         assert any(s["transport_terminal"] == expected for s in before), (name, expected)

@@ -45,7 +45,7 @@ def run_case(exe, name, media, short_media, dest):
             pass
 
         def do_GET(self):
-            requests.append({"range": self.headers.get("Range"),
+            requests.append({"path": self.path, "range": self.headers.get("Range"),
                              "test_header_present": self.headers.get("X-Fixture-Auth") == "synthetic-sentinel"})
             stamp("request_received")
             requested.set()
@@ -65,6 +65,11 @@ def run_case(exe, name, media, short_media, dest):
                     self.send_header("Content-Length", "0")
                     self.end_headers()
                     stamp("redirect_sent")
+                    return
+                if name == "redirect" and self.headers.get("X-Fixture-Auth") != "synthetic-sentinel":
+                    self.send_response(401)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
                     return
                 data = short_media if name in ("short_eof", "truncated_body") else media
                 if name == "fake_audio":
