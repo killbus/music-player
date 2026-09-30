@@ -16,14 +16,18 @@ def api(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('workflows', nargs='*', default=['.github/workflows/release.yml'])
+    parser.add_argument('workflows', nargs='*',
+                        default=['.github/workflows/release.yml',
+                                 '.github/workflows/release-for-mac.yml',
+                                 '.github/workflows/release-slint-desktop.yml',
+                                 '.github/workflows/release-for-windows.yml'])
     args = parser.parse_args()
     records = {row['repository'].removeprefix('https://github.com/'): row
-               for row in json.loads((ROOT / '.github/action-versions.json').read_text())}
+               for row in json.loads((ROOT / '.github/action-versions.json').read_text(encoding='utf-8'))}
     checked = set()
     for workflow in args.workflows:
         for ref in re.findall(r'(?m)^\s*-?\s*uses:\s*[\"\x27]?([^\s\"\x27#]+)',
-                              (ROOT / workflow).read_text()):
+                              (ROOT / workflow).read_text(encoding='utf-8')):
             if ref.startswith('./'):
                 continue
             action, pin = ref.rsplit('@', 1)

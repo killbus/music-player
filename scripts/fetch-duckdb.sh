@@ -20,18 +20,47 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 lib_dir="$root/vendor/duckdb/lib"
 stamp="$lib_dir/.stamp"
 
-case "$(uname -s)/$(uname -m)" in
-  Darwin/arm64)  platform="osx-arm64"   ;;
-  Darwin/x86_64) platform="osx-amd64"   ;;
-  Linux/aarch64) platform="linux-arm64" ;;
-  Linux/x86_64)  platform="linux-amd64" ;;
-  *)
+# The platform of the *target* matters, not the machine running this script:
+# cross-compiling x86_64-apple-darwin on an arm64 macOS runner must link the
+# amd64 archives, or the link fails and the release job dies (v0.4.5).
+# CARGO_BUILD_TARGET is how release workflows pin the target; the platform is
+# only resolved from the host when no explicit target is set.
+target="${CARGO_BUILD_TARGET:-}"
+
+platform_from_target() {
+  case "$1" in
+    x86_64-apple-darwin)       echo "osx-amd64"   ;;
+    aarch64-apple-darwin)      echo "osx-arm64"   ;;
+    x86_64-unknown-linux-gnu)  echo "linux-amd64" ;;
+    aarch64-unknown-linux-gnu) echo "linux-arm64" ;;
+    *) return 1 ;;
+  esac
+}
+
+platform_from_host() {
+  case "$1" in
+    Darwin/arm64)  echo "osx-arm64"   ;;
+    Darwin/x86_64) echo "osx-amd64"   ;;
+    Linux/aarch64) echo "linux-arm64" ;;
+    Linux/x86_64)  echo "linux-amd64" ;;
+    *) return 1 ;;
+  esac
+}
+
+platform="$(platform_from_target "$target")" || {
+  if [ -n "$target" ]; then
+    echo "fetch-duckdb: no prebuilt static DuckDB for target $target." >&2
+    echo "  Build against a shared library instead:" >&2
+    echo "    DUCKDB_LIB_DIR= DUCKDB_STATIC= DUCKDB_DOWNLOAD_LIB=1 cargo build" >&2
+    exit 1
+  fi
+  platform="$(platform_from_host "$(uname -s)/$(uname -m)")" || {
     echo "fetch-duckdb: no prebuilt static DuckDB for $(uname -s)/$(uname -m)." >&2
     echo "  Build against a shared library instead:" >&2
     echo "    DUCKDB_LIB_DIR= DUCKDB_STATIC= DUCKDB_DOWNLOAD_LIB=1 cargo build" >&2
     exit 1
-    ;;
-esac
+  }
+}
 
 want="$VERSION-$platform"
 if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$want" ]; then

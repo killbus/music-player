@@ -153,3 +153,7 @@ tracing = "0.1"
 tracing-subscriber = {version = "0.3", features = ["env-filter"]}
 ratatui = {version = "0.30", features = ["serde"]}
 tungstenite = "0.17.3"
+
+[patch.crates-io]
+# 0.7.0 passes i64 metadata to C long, which is 32-bit on Windows.
+rockbox-playback = { path = "third-party/rockbox-playback-0.7.0" }

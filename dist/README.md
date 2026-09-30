@@ -59,7 +59,35 @@ directory mapping survives UID changes. Settings and SQLite share
 files to a transient dynamic UID. Interactive CLI settings in your login account
 are separate from the service's settings.
 
-For Snapcast, configure Snapserver to create and read a FIFO, for example:
+For example, edit `/etc/default/music-player` to change the HTTP port and
+periodic library scan interval (in minutes; `0` disables periodic scans):
+
+```ini
+MUSIC_PLAYER_HTTP_PORT=8080
+MUSIC_PLAYER_LIBRARY_REFRESH_INTERVAL=10
+```
+
+Use `KEY=value` lines without `export`, then run
+`sudo systemctl restart music-player`. Editing this environment file does not
+require `daemon-reload`. `HTTP_PORT` controls the Web UI and HTTP API; `PORT`
+is a separate setting.
+The service grants `CAP_NET_BIND_SERVICE` to its non-root process, so an
+explicit `MUSIC_PLAYER_HTTP_PORT=80` is also supported. The default remains 5053.
+
+The complete configuration is
+`/var/lib/music-player/config/music-player/settings.toml`, normally created on
+the first successful start. Edit settings such as `http_port = 8080` there,
+including nested TOML tables, then restart the service. Environment variables
+override the corresponding TOML values. A drop-in overriding `XDG_CONFIG_HOME`
+also changes the settings file location.
+
+For Snapcast, use a FIFO shared by both services. The service's private `/tmp`
+is not shared with Snapserver. Use the same explicit `/run` path in both
+services instead of `/tmp/snapfifo`. The parent directory must be created with
+permissions allowing Snapserver to create the FIFO; a non-root Snapserver
+cannot normally create it directly under `/run`. Its systemd `RuntimeDirectory`
+can manage that parent directory across reboots. Configure Snapserver to create
+and read the FIFO, for example:
 
 ```ini
 [stream]
@@ -96,6 +124,22 @@ Package service actions respect Debian's `policy-rc.d`. Package upgrades do not
 override administrator masks. Delete retained data explicitly only when no
 longer needed. `/etc/default/music-player` is a DEB conffile, so local edits are
 preserved by normal package upgrades.
+
+### Containers (LXC, systemd as PID 1)
+
+The unit uses mount namespaces for dynamic-user state/cache isolation and
+private temporary files. Restricted LXC containers may reject this setup with
+`status=226/NAMESPACE` before the application starts. Check
+`journalctl -u music-player -b` and the container host security logs. A
+root-owned `/var/cache/private` with mode `0700` is expected; do not loosen its
+permissions. Starting systemctl as another user does not fix this failure.
+
+The container host must allow the required namespace and mount operations.
+The appropriate nesting/AppArmor configuration depends on the container
+manager; enabling nesting alone is not a verified fix for every LXC setup.
+Clearing and re-adding the same directory directives does not disable isolation.
+CI tests the DEB service on native Ubuntu runners, not inside LXC. The
+published container image starts the daemon directly without this systemd unit.
 
 ## Run the published container
 

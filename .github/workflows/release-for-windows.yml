@@ -1,6 +1,24 @@
 on:
+  pull_request:
   release:
     types: [created]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The existing release tag to build and upload assets for (e.g. v0.2.0)"
+        type: string
+        required: false
+      publish:
+        description: Upload missing assets to the existing release
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+  PUBLISH_RELEASE: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
 
 jobs:
   compile:
@@ -8,15 +26,20 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Test publication gates
+        run: python scripts/test-release-assets.py
+      - name: Validate release metadata
+        run: python scripts/release-assets.py prepare
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Install dependencies
         run: |
-          choco install protoc
-          choco install rust --version=1.98.0
-          choco install checksum
-          choco install archiver
-          choco install nodejs-lts
-          refreshenv
+          choco install protoc -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup toolchain install 1.98.0 --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup default 1.98.0
       # No static DuckDB is published for an MSVC target, so Windows links the
       # shared library instead. Setting these in the environment overrides the
       # static defaults in .cargo/config.toml, which exist for the platforms
@@ -35,22 +58,42 @@ jobs:
           echo "DUCKDB_STATIC=0" >> $env:GITHUB_ENV
           echo "$dir" >> $env:GITHUB_PATH
 
-      - name: Build
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Build Web UI
+        working-directory: webui/musicplayer
         run: |
-          cd webui\musicplayer
-          npm install -g yarn
-          yarn install --network-timeout 1000000000
-          yarn build
-          cd ..\..
-          cargo build --release
-          copy "%GITHUB_WORKSPACE%\vendor\duckdb\lib\duckdb.dll" target\release\ 2>nul
-          arc archive music-player_x86_64-pc-windows-gnu.tar.gz  target\release\music-player.exe target\release\duckdb.dll
-          checksum -t sha256  -f="music-player_x86_64-pc-windows-gnu.tar.gz" > music-player_x86_64-pc-windows-gnu.tar.gz.sha256
-      - name: Releasing assets
-        uses: softprops/action-gh-release@v1
+          bun install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bun run build
+
+      - name: Test ReplayGain ABI conversion
+        run: cargo test --locked -p rockbox-playback --lib replaygain_c_long_preserves_values_and_saturates
+
+      - name: Build CLI
+        run: cargo build --locked --release -p music-player --target x86_64-pc-windows-msvc
+
+      - name: Package and verify CLI
+        run: |
+          $binaryDir = 'target/x86_64-pc-windows-msvc/release'
+          Copy-Item vendor/duckdb/lib/duckdb.dll $binaryDir
+          & "$binaryDir/music-player.exe" --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $asset = "music-player_$env:RELEASE_VERSION`_x86_64-pc-windows-msvc.tar.gz"
+          tar -czf $asset -C $binaryDir music-player.exe duckdb.dll
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $asset" | Set-Content -Encoding ascii "$asset.sha256"
+
+      - name: Save validation artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          files: |
-            music-player_x86_64-pc-windows-gnu.tar.gz
-            music-player_x86_64-pc-windows-gnu.tar.gz.sha256
+          name: windows-cli-x86_64
+          path: '*.tar.gz*'
+          if-no-files-found: error
+
+      - name: Upload missing release assets
+        if: env.PUBLISH_RELEASE == 'true'
+        run: python scripts/release-assets.py publish '*.tar.gz*'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

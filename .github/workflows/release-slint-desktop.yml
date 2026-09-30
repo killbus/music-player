@@ -1,5 +1,6 @@
 name: release-slint-desktop
 on:
+  pull_request:
   release:
     types: [created]
   workflow_dispatch:
@@ -7,10 +8,18 @@ on:
       tag:
         description: "The existing release tag to build and upload assets for (e.g. v0.2.0)"
         type: string
-        required: true
+        required: false
+      publish:
+        description: Upload missing assets to the existing release
+        type: boolean
+        default: false
 
 permissions:
   contents: write
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+  PUBLISH_RELEASE: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
 
 jobs:
   release:
@@ -24,7 +33,7 @@ jobs:
             os: macos-latest
             mac_arch: aarch64
           - target: x86_64-apple-darwin
-            os: macos-latest
+            os: macos-15-intel
             mac_arch: x64
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
@@ -35,12 +44,12 @@ jobs:
       # manual dispatch, the tag for a release event). Checking out the INPUT
       # tag would rebuild that tag's tree — which may predate the desktop
       # crate entirely; the tag input only selects which release to upload to.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Set release version
-        run: echo "RELEASE_VERSION=${TAG_INPUT:-${GITHUB_REF#refs/*/}}" >> $GITHUB_ENV
+      - name: Validate release metadata
+        run: python3 scripts/release-assets.py prepare
         env:
-          TAG_INPUT: ${{ inputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Vendor DuckDB
         # `libduckdb-sys` resolves `-l static=duckdb_static` when its own crate
@@ -48,8 +57,10 @@ jobs:
         # ahead of that — so the libraries must be on disk before cargo runs at
         # all. See scripts/fetch-duckdb.sh.
         run: ./scripts/fetch-duckdb.sh
+        env:
+          CARGO_BUILD_TARGET: ${{ matrix.target }}
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
       - name: Install Rust 1.98.0
         run: |
@@ -57,7 +68,7 @@ jobs:
           rustup default 1.98.0
           rustup target add ${{ matrix.target }}
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -82,11 +93,14 @@ jobs:
       - name: Build webui
         run: |
           cd webui/musicplayer
-          bun install
+          bun install --frozen-lockfile
           bun run build
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }} -p music-player -p music-player-desktop
+        run: cargo build --locked --release --target ${{ matrix.target }} -p music-player -p music-player-desktop
+
+      - name: Verify CLI startup
+        run: target/${{ matrix.target }}/release/music-player --help
 
       - name: Install Linux packaging tools
         if: runner.os == 'Linux'
@@ -113,11 +127,7 @@ jobs:
           tar czvf $ASSET.tar.gz -C target/${{ matrix.target }}/release music-player-desktop
           sha256sum $ASSET.tar.gz > $ASSET.tar.gz.sha256
 
-      # Ships an ad-hoc signed `Music Player.app`. The asset names are kept
-      # byte-identical to the ones earlier releases used so that
-      # `gh release upload --clobber` overwrites the broken downloads rather
-      # than leaving them alongside the new ones. COPYFILE_DISABLE keeps macOS
-      # tar from injecting ._AppleDouble files into the signed bundle.
+      # COPYFILE_DISABLE excludes AppleDouble files from the signed bundle.
       - name: Package macOS app bundle
         if: runner.os == 'macOS'
         run: |
@@ -132,32 +142,38 @@ jobs:
           mv "dist/build/Music Player.dmg" "$DMG"
           shasum -a 256 $DMG > $DMG.sha256
 
+      - name: Save validation artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-${{ matrix.target }}
+          path: |
+            *.tar.gz*
+            *.dmg*
+            dist/*.deb*
+            dist/*.rpm*
+          if-no-files-found: error
+
       - name: Upload release assets
-        run: |
-          gh release upload ${{ env.RELEASE_VERSION }} \
-            music-player-desktop_${{ env.RELEASE_VERSION }}_${{ matrix.target }}.tar.gz \
-            music-player-desktop_${{ env.RELEASE_VERSION }}_${{ matrix.target }}.tar.gz.sha256 \
-            --clobber
+        if: env.PUBLISH_RELEASE == 'true'
+        run: python3 scripts/release-assets.py publish '*.tar.gz*'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload macOS disk image
-        if: runner.os == 'macOS'
-        run: |
-          DMG=Music_Player_${{ env.RELEASE_VERSION }}_${{ matrix.mac_arch }}.dmg
-          gh release upload ${{ env.RELEASE_VERSION }} "$DMG" "$DMG.sha256" --clobber
+        if: env.PUBLISH_RELEASE == 'true' && runner.os == 'macOS'
+        run: python3 scripts/release-assets.py publish '*.dmg*'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload Linux packages to GitHub release
-        if: runner.os == 'Linux'
+        if: env.PUBLISH_RELEASE == 'true' && runner.os == 'Linux'
         shell: bash
-        run: gh release upload "${{ env.RELEASE_VERSION }}" dist/*.deb dist/*.deb.sha256 dist/*.rpm dist/*.rpm.sha256 --clobber
+        run: python3 scripts/release-assets.py publish 'dist/*.deb*' 'dist/*.rpm*'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check Gemfury secrets
-        if: runner.os == 'Linux'
+        if: github.event_name == 'release' && runner.os == 'Linux'
         id: gemfury
         env:
           FURY_TOKEN: ${{ secrets.FURY_TOKEN }}
