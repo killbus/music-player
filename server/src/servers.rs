@@ -7,7 +7,7 @@
 
 use music_player_provider::{ConnectedProvider, Page, ProviderConfig, ProviderState};
 use music_player_storage::{
-    saved_servers::{self, NewServer, SavedServer},
+    saved_servers::{self, NewServer, PasswordUpdate, SavedServer},
     Database,
 };
 use music_player_tracklist::Tracklist as TracklistState;
@@ -78,7 +78,7 @@ fn to_proto(row: SavedServer, connected_id: Option<&str>) -> Server {
         name: row.name,
         url: row.url,
         username: row.username.unwrap_or_default(),
-        has_password: row.password.is_some_and(|password| !password.is_empty()),
+        has_password: row.password.is_some(),
     }
 }
 
@@ -134,18 +134,16 @@ impl ServersService for Servers {
                 server: None,
             }));
         };
-        // A discovered peer has no saved row, so fall back to the live config.
-        let server = match saved_servers::get(self.db.get_connection(), &config.id).await {
-            Ok(Some(row)) => to_proto(row, Some(config.id.as_str())),
-            _ => Server {
-                id: config.id.clone(),
-                kind: config.kind.clone(),
-                name: config.name.clone(),
-                url: config.url.clone(),
-                username: config.username.clone().unwrap_or_default(),
-                has_password: config.password.is_some(),
-                connected: true,
-            },
+        // Editing a saved account does not rebuild its live connection. Report
+        // the config used to connect, even if the saved row has since changed.
+        let server = Server {
+            id: config.id,
+            kind: config.kind,
+            name: config.name,
+            url: config.url,
+            username: config.username.unwrap_or_default(),
+            has_password: config.password.is_some(),
+            connected: true,
         };
         Ok(tonic::Response::new(GetConnectedServerResponse {
             server: Some(server),
@@ -174,8 +172,16 @@ impl ServersService for Servers {
             None => request.url.clone(),
         };
 
+        let password_update = PasswordUpdate::from_fields(
+            Some(request.password),
+            request.password_value,
+            request.clear_password,
+        )
+        .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
         let server = NewServer::new(request.kind, request.name, url)
-            .with_credentials(Some(request.username), Some(request.password));
+            .with_credentials(Some(request.username), None)
+            .with_id(request.id)
+            .with_password_update(password_update);
         let row = saved_servers::upsert(self.db.get_connection(), &server, &now())
             .await
             .map_err(internal)?;

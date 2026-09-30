@@ -468,6 +468,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
         .await?;
         db.create_indexes().await;
+        if let Err(error) = music_player_storage::saved_servers::import_legacy_once(
+            conn,
+            &chrono::Utc::now().to_rfc3339(),
+        )
+        .await
+        {
+            tracing::warn!(%error, "legacy saved account import will retry next startup");
+        }
     }
 
     let db = Database::new().await;

@@ -15,7 +15,7 @@ use sea_orm::entity::prelude::*;
 #[derive(Clone, Debug, Default, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "saved_server")]
 pub struct Model {
-    /// `md5(kind + "\0" + url)`, so adding the same server twice is one row.
+    /// Immutable local account handle. New rows use UUIDs; legacy IDs stay valid.
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: String,
     /// `subsonic`, `jellyfin`, `music-player`, `kodi`, …
