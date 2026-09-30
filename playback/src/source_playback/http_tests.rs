@@ -117,7 +117,7 @@ async fn native_audio_reaches_pcm_with_auth_and_eof_retains_the_pinned_checkpoin
             }
         });
         let pcm = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let output = format!("tcp:{}", pcm.local_addr().unwrap()).parse().unwrap();
+        let output = format!("tcp-connect:{}", pcm.local_addr().unwrap()).parse().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let collected = received.clone();
         let collector = tokio::spawn(async move {

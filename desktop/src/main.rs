@@ -1189,6 +1189,8 @@ fn switcher_results(query: &str) -> Vec<PaletteItem> {
                 out.push(server_row(
                     if srv.kind == "jellyfin" {
                         "jellyfin"
+                    } else if srv.kind == "emby" {
+                        "emby"
                     } else {
                         "subsonic"
                     },

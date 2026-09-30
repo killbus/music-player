@@ -1,6 +1,9 @@
 #[cfg(test)]
 mod tests;
 
+pub mod emby;
+pub use emby::EmbyRuntimeSettings;
+
 use std::{
     env,
     fs::{self, File},
@@ -219,6 +222,15 @@ fn default_car_max_age_hours() -> u64 {
     24
 }
 
+// Older/minimal settings files can omit device_id. Keep their default
+// stable across registry and playback reads, retaining the MD5-of-UUID format.
+fn default_device_id() -> String {
+    static DEFAULT_DEVICE_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    DEFAULT_DEVICE_ID
+        .get_or_init(|| format!("{:x}", md5::compute(Uuid::new_v4().to_string())))
+        .clone()
+}
+
 pub fn read_settings() -> Result<Config, ConfigError> {
     let path = match env::consts::OS {
         "android" => "/storage/emulated/0/Android/data/com.tsirysndr.songbird/files".to_owned(),
@@ -242,7 +254,7 @@ pub fn read_settings() -> Result<Config, ConfigError> {
 
     fs::create_dir_all(&covers_path).unwrap();
 
-    let device_id = format!("{:x}", md5::compute(Uuid::new_v4().to_string()));
+    let device_id = default_device_id();
 
     let mut tmp = PathBuf::new();
     tmp.push("/tmp");

@@ -4,19 +4,68 @@
 
 use crate::{
     Album, Artist, MusicProvider, Page, ProviderCapabilities, ProviderConfig, ProviderError,
-    SearchResults, Track,
+    ProviderFactory, SearchResults, Track,
 };
+use music_player_settings::EmbyRuntimeSettings;
 use music_player_types::source::{RemoteIdentity, ResourceKind, SourceRef};
 use reqwest::{
     header::{HeaderMap, HeaderValue, LOCATION},
     Method, StatusCode,
 };
 use serde::{de::DeserializeOwned, Deserialize};
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 use url::Url;
 
 const PAGE_SIZE: usize = 500;
 const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
+
+/// Native Emby authentication for the saved-server registry. The host still
+/// verifies and binds the returned identity before publishing the provider.
+pub struct EmbyFactory {
+    device_id: String,
+    follow_redirects: bool,
+}
+
+impl EmbyFactory {
+    pub fn new(device_id: String, follow_redirects: bool) -> Self {
+        Self {
+            device_id,
+            follow_redirects,
+        }
+    }
+}
+
+impl Default for EmbyFactory {
+    fn default() -> Self {
+        let settings = EmbyRuntimeSettings::read();
+        Self::new(settings.device_id, settings.follow_redirects)
+    }
+}
+
+#[async_trait::async_trait]
+impl ProviderFactory for EmbyFactory {
+    fn kind(&self) -> &'static str {
+        "emby"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Emby"
+    }
+
+    fn default_port(&self) -> u16 {
+        8096
+    }
+
+    async fn connect(
+        &self,
+        config: &ProviderConfig,
+    ) -> Result<Arc<dyn MusicProvider>, ProviderError> {
+        // Empty passwords are valid: pass the original account config through.
+        Ok(Arc::new(
+            Emby::authenticate(config, &self.device_id, self.follow_redirects).await?,
+        ))
+    }
+}
 
 pub struct Emby {
     client: reqwest::Client,
@@ -533,3 +582,6 @@ pub(crate) struct UserData {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod factory_tests;

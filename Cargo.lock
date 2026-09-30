@@ -8501,6 +8501,7 @@ dependencies = [
  "base64 0.22.1",
  "jsonrpsee",
  "md5",
+ "music-player-settings",
  "music-player-types",
  "reqwest 0.12.28",
  "serde",

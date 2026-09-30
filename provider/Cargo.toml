@@ -11,6 +11,10 @@ description = "The remote music source trait and registry of music player"
 path = "../types"
 version = "0.4.5"
 
+[dependencies.music-player-settings]
+path = "../settings"
+version = "0.4.5"
+
 [dependencies]
 async-trait = "0.1.60"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

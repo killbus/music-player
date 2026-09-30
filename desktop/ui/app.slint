@@ -3852,7 +3852,7 @@ export component AppWindow inherits Window {
                         letter-spacing: 1px;
                     }
                     kind-dd := Dropdown {
-                        options: ["Subsonic / Navidrome", "Jellyfin", "music-player", "Kodi", "Plex", "Rocksky"];
+                        options: ["Subsonic / Navidrome", "Jellyfin", "music-player", "Kodi", "Plex", "Rocksky", "Emby"];
                         current: 0;
                         menu-width: 190px;
                         selected(i) => { self.current = i; }
@@ -3873,7 +3873,7 @@ export component AppWindow inherits Window {
                     height: kind-dd.current == 5 ? 0px : self.preferred-height;
                     // The port each kind actually listens on, so the example is
                     // one that would work rather than one to be edited.
-                    placeholder: kind-dd.current == 1 ? "http://192.168.1.10:8096"
+                    placeholder: (kind-dd.current == 1 || kind-dd.current == 6) ? "http://192.168.1.10:8096"
                         : kind-dd.current == 2 ? "http://192.168.1.10:5053"
                         : kind-dd.current == 3 ? "http://192.168.1.10:8080"
                         : kind-dd.current == 4 ? "http://192.168.1.10:32400"
@@ -3943,6 +3943,7 @@ export component AppWindow inherits Window {
                                             : kind-dd.current == 3 ? "kodi"
                                             : kind-dd.current == 4 ? "plex"
                                             : kind-dd.current == 5 ? "rocksky"
+                                            : kind-dd.current == 6 ? "emby"
                                             : "subsonic",
                                         name-field.text == "" ? url-field.text : name-field.text,
                                         url-field.text,
