@@ -3,8 +3,8 @@
 //! remote identity to the saved account before publishing this provider.
 
 use crate::{
-    Album, Artist, MusicProvider, Page, ProviderCapabilities, ProviderConfig, ProviderError,
-    ProviderFactory, SearchResults, Track,
+    Album, Artist, MediaEntry, MusicProvider, Page, ProviderCapabilities, ProviderConfig,
+    ProviderError, ProviderFactory, SearchResults, Track,
 };
 use music_player_settings::EmbyRuntimeSettings;
 use music_player_types::source::{RemoteIdentity, ResourceKind, SourceRef};
@@ -385,6 +385,64 @@ impl Emby {
         Ok(items)
     }
 
+    async fn views(&self, page: Page) -> Result<Vec<Item>, ProviderError> {
+        // Emby's Views endpoint has no StartIndex/Limit in its API contract.
+        // Fetch the whole root list once and apply the caller's page locally.
+        let result: Items = self
+            .json(
+                Method::GET,
+                &["Users", &self.identity.user_id, "Views"],
+                &[],
+                None,
+            )
+            .await?;
+        if result.start_index.is_some_and(|start| start != 0)
+            || result
+                .total_record_count
+                .is_some_and(|total| total != result.items.len())
+        {
+            return Err(other("Emby returned an incomplete root listing"));
+        }
+        let mut seen = HashSet::new();
+        for item in &result.items {
+            if !seen.insert(&item.id) {
+                return Err(other("Emby root listing repeated an item"));
+            }
+        }
+        Ok(page.slice(result.items))
+    }
+
+    fn map_entry(&self, item: &Item) -> Result<MediaEntry, ProviderError> {
+        let is_container = item.is_container();
+        let kind = if is_container {
+            ResourceKind::Container
+        } else {
+            ResourceKind::Item
+        };
+        Ok(MediaEntry {
+            id: self.reference(kind, &item.id)?.to_handle(),
+            title: item.name.clone(),
+            item_type: item.item_type.clone(),
+            media_type: item.media_type.clone(),
+            is_container,
+            season_number: match item.item_type.as_deref() {
+                Some("Season") => item.index_number,
+                Some("Episode") => item.parent_index_number,
+                _ => None,
+            },
+            episode_number: if item.item_type.as_deref() == Some("Episode") {
+                item.index_number
+            } else {
+                None
+            },
+            track: if item.is_media_leaf() {
+                Some(self.map_track(item)?)
+            } else {
+                None
+            },
+        })
+    }
+
     pub(crate) fn map_track(&self, item: &Item) -> Result<Track, ProviderError> {
         if !item.is_media_leaf() {
             return Err(other("this Emby item is not an audio/video leaf"));
@@ -429,11 +487,18 @@ impl Emby {
                 .run_time_ticks
                 .map(|ticks| (ticks as f64 / 10_000_000.0) as f32),
             disc_number: if music {
-                item.parent_index_number.unwrap_or(1)
+                // Legacy music fields are u32. Never wrap a larger index;
+                // episode/season numbers live losslessly on MediaEntry.
+                u32::try_from(item.parent_index_number.unwrap_or(1)).unwrap_or(0)
             } else {
                 0
             },
-            track_number: if music { item.index_number } else { None },
+            track_number: if music {
+                item.index_number
+                    .and_then(|index| u32::try_from(index).ok())
+            } else {
+                None
+            },
             liked: item.user_data.as_ref().map(|user| user.is_favorite),
             ..Default::default()
         })
@@ -457,9 +522,54 @@ impl MusicProvider for Emby {
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             native_search: true,
+            media_browse: true,
             ..Default::default()
         }
     }
+    async fn browse(
+        &self,
+        parent: Option<&str>,
+        page: Page,
+    ) -> Result<Vec<MediaEntry>, ProviderError> {
+        let items = match parent {
+            None => self.views(page).await?,
+            Some(parent) => {
+                // Validate before I/O: a handle from another account, an old
+                // bare provider ID or a playable leaf is never a parent.
+                let source = self.check_reference(parent, ResourceKind::Container)?;
+                self.items(
+                    vec![("ParentId", source.item_id), ("Recursive", "false".into())],
+                    page,
+                )
+                .await?
+            }
+        };
+        items.iter().map(|item| self.map_entry(item)).collect()
+    }
+
+    async fn container_tracks(
+        &self,
+        parent: &str,
+        page: Page,
+    ) -> Result<Vec<Track>, ProviderError> {
+        let source = self.check_reference(parent, ResourceKind::Container)?;
+        self.items(
+            vec![
+                ("ParentId", source.item_id),
+                ("Recursive", "true".into()),
+                ("MediaTypes", "Audio,Video".into()),
+                ("IsFolder", "false".into()),
+            ],
+            page,
+        )
+        .await?
+        .iter()
+        // Keep the remote page cursor independent of this defensive filter.
+        .filter(|item| item.is_media_leaf())
+        .map(|item| self.map_track(item))
+        .collect()
+    }
+
     async fn search(&self, keyword: &str, page: Page) -> Result<SearchResults, ProviderError> {
         Ok(SearchResults {
             tracks: self.tracks(Some(keyword), page).await?,
@@ -554,8 +664,8 @@ pub(crate) struct Item {
     pub is_folder: Option<bool>,
     pub run_time_ticks: Option<u64>,
     pub series_name: Option<String>,
-    pub index_number: Option<u32>,
-    pub parent_index_number: Option<u32>,
+    pub index_number: Option<u64>,
+    pub parent_index_number: Option<u64>,
     pub album: Option<String>,
     pub album_id: Option<String>,
     #[serde(default)]
@@ -563,9 +673,26 @@ pub(crate) struct Item {
     pub user_data: Option<UserData>,
 }
 impl Item {
+    fn is_container(&self) -> bool {
+        self.is_folder == Some(true)
+            || matches!(
+                self.item_type.as_deref(),
+                Some(
+                    "CollectionFolder"
+                        | "UserView"
+                        | "Folder"
+                        | "Series"
+                        | "Season"
+                        | "BoxSet"
+                        | "MusicAlbum"
+                        | "MusicArtist"
+                        | "Playlist"
+                )
+            )
+    }
+
     pub fn is_media_leaf(&self) -> bool {
-        !self.is_folder.unwrap_or(false)
-            && matches!(self.media_type.as_deref(), Some("Audio" | "Video"))
+        !self.is_container() && matches!(self.media_type.as_deref(), Some("Audio" | "Video"))
     }
 }
 #[derive(Clone, Deserialize)]

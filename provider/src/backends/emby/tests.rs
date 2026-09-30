@@ -1,6 +1,8 @@
 //! Loopback protocol tests only. All credentials and media metadata are synthetic.
 //! No decoder, media server, or detached fixture task is involved.
 
+mod browse;
+
 use super::{Emby, MusicProvider, Page, ProviderConfig, ProviderError, ResourceKind, SourceRef};
 use crate::emby_playback::AudioSelection;
 use serde_json::{json, Value};

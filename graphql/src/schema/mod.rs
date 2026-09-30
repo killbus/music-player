@@ -9,6 +9,7 @@ use self::{
     devices::{DevicesMutation, DevicesQuery, DevicesSubscription},
     extensions::{ExtensionsMutation, ExtensionsQuery},
     library::{LibraryMutation, LibraryQuery},
+    media::MediaQuery,
     mixer::{MixerMutation, MixerQuery},
     playback::{PlaybackMutation, PlaybackQuery, PlaybackSubscription},
     playlist::{PlaylistMutation, PlaylistQuery, PlaylistSubscription},
@@ -25,6 +26,7 @@ pub mod devices;
 pub mod extensions;
 pub mod history;
 pub mod library;
+pub mod media;
 pub mod mixer;
 pub mod objects;
 pub mod playback;
@@ -38,6 +40,7 @@ pub mod tracklist;
 pub struct Query(
     DevicesQuery,
     LibraryQuery,
+    MediaQuery,
     MixerQuery,
     PlaybackQuery,
     PlaylistQuery,
