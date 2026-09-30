@@ -2,6 +2,8 @@
 """Install the real DEB on an ephemeral systemd CI runner and test lifecycle."""
 import array
 import json
+import grp
+import pwd
 import math
 import os
 from pathlib import Path
@@ -16,6 +18,7 @@ UNIT = 'music-player.service'
 STATE = Path('/var/lib/music-player')
 DEFAULTS = Path('/etc/default/music-player')
 DROPIN = Path('/etc/systemd/system/music-player.service.d/ci.conf')
+HTTP_PORT = 5053
 
 
 def run(*args):
@@ -27,7 +30,7 @@ def active():
 
 
 def graphql(query, variables=None):
-    request = urllib.request.Request('http://127.0.0.1:5053/graphql',
+    request = urllib.request.Request(f'http://127.0.0.1:{HTTP_PORT}/graphql',
         data=json.dumps({'query': query, 'variables': variables or {}}).encode(),
         headers={'Content-Type': 'application/json'})
     with urllib.request.urlopen(request, timeout=3) as response:
@@ -50,6 +53,7 @@ def ready():
 
 
 def main():
+    global HTTP_PORT
     # These fixed system paths are intentional only on disposable GitHub runners.
     assert os.geteuid() == 0 and Path('/run/systemd/system').is_dir()
     assert not STATE.exists() and not DEFAULTS.exists() and not DROPIN.exists(), 'runner is not clean'
@@ -57,13 +61,16 @@ def main():
     evidence = Path('dist/build/evidence')
     evidence.mkdir(parents=True, exist_ok=True)
     report = {}
-    pipes = Path('/run/music-player-ci')
+    pipes = Path('/tmp/music-player-ci')
     media = Path('/srv/music-player-ci')
     fd = None
     reader_done = threading.Event()
     reader = None
     received = [0]
+    original_unprivileged_port = run('sysctl', '-n', 'net.ipv4.ip_unprivileged_port_start')
     try:
+        # Ensure port 80 really requires a capability on this runner.
+        run('sysctl', '-w', 'net.ipv4.ip_unprivileged_port_start=1024')
         run('apt-get', 'install', '-y', '--no-install-recommends', str(package.resolve()))
         run('systemd-analyze', 'verify', '/usr/lib/systemd/system/' + UNIT)
         assert not active(), 'first install started daemon'
@@ -73,8 +80,11 @@ def main():
         pipes.mkdir(mode=0o755)
         media.mkdir(mode=0o755)
         fifo = pipes / 'probe.fifo'
-        os.mkfifo(fifo, 0o666)
-        fifo.chmod(0o666)
+        run('groupadd', '--system', 'music-player-ci')
+        fifo_group = grp.getgrnam('music-player-ci').gr_gid
+        os.mkfifo(fifo, 0o660)
+        os.chown(fifo, 0, fifo_group)
+        fifo.chmod(0o660)
         fd = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
 
         def drain():
@@ -98,12 +108,17 @@ def main():
                             'MUSIC_PLAYER_ATPROTO=false\nMUSIC_PLAYER_SCROBBLE=false\n'
                             'MUSIC_PLAYER_REMOTE_PLAYER=false\n')
         DROPIN.parent.mkdir(parents=True)
-        DROPIN.write_text(f'[Service]\nReadWritePaths={fifo}\n')
+        DROPIN.write_text('[Service]\nSupplementaryGroups=music-player-ci\n')
         run('systemctl', 'daemon-reload')
         run('systemctl', 'enable', '--now', UNIT)
         tracks = ready()
         pid = run('systemctl', 'show', '-p', 'MainPID', '--value', UNIT)
-        assert int(run('ps', '-o', 'uid=', '-p', pid)) != 0, 'service runs as root'
+        service_uid = pwd.getpwnam('music-player').pw_uid
+        assert service_uid != 0
+        assert int(run('ps', '-o', 'uid=', '-p', pid)) == service_uid
+        assert os.readlink(f'/proc/{pid}/ns/mnt') == os.readlink('/proc/1/ns/mnt'), 'unexpected mount isolation'
+        assert run('systemctl', 'show', '-p', 'DynamicUser', '--value', UNIT) == 'no'
+        report['shared_tmp_group_fifo'] = True
         graphql('mutation($track:TrackInput!) { addTrack(track:$track) { id } }', {'track': tracks[0]})
         graphql('mutation { play }')
         deadline = time.monotonic() + 20
@@ -112,6 +127,17 @@ def main():
         assert received[0] >= 44100, 'service could not write decoded audio to external FIFO'
         graphql('mutation { stop }')
         report.update(nonroot=True, fifo_pcm_bytes=received[0])
+        with DEFAULTS.open('a') as output:
+            output.write('MUSIC_PLAYER_HTTP_PORT=80\n')
+        HTTP_PORT = 80
+        run('systemctl', 'restart', UNIT)
+        ready()
+        pid = run('systemctl', 'show', '-p', 'MainPID', '--value', UNIT)
+        assert int(run('ps', '-o', 'uid=', '-p', pid)) != 0, 'port 80 service runs as root'
+        status = Path(f'/proc/{pid}/status').read_text()
+        caps = next(line.split()[1] for line in status.splitlines() if line.startswith('CapEff:'))
+        assert int(caps, 16) & (1 << 10), 'missing CAP_NET_BIND_SERVICE'
+        report['nonroot_http_port_80'] = True
         settings = STATE / 'config/music-player/settings.toml'
         with settings.open('a') as output:
             output.write('\n# service persistence probe\n')
@@ -144,10 +170,12 @@ def main():
         assert DEFAULTS.read_bytes() == defaults_before
         run('dpkg', '--purge', 'music-player-cli')
         assert settings.exists() and not DEFAULTS.exists()
+        assert pwd.getpwnam('music-player').pw_uid == service_uid, 'purge removed retained data owner'
         assert not os.path.lexists('/etc/systemd/system/multi-user.target.wants/' + UNIT)
         report['remove_stops_purge_retains_data'] = True
         print(json.dumps(report))
     finally:
+        run('sysctl', '-w', f'net.ipv4.ip_unprivileged_port_start={original_unprivileged_port}')
         subprocess.run(['systemctl', 'stop', UNIT], check=False)
         reader_done.set()
         if reader:

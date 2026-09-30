@@ -11484,8 +11484,6 @@ dependencies = [
 [[package]]
 name = "rockbox-playback"
 version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29c9f82837524c81bebf5c8590bfdce1f211f6aba0403ea79fe3593bb1c282a9"
 dependencies = [
  "cpal",
  "quick-xml 0.37.5",

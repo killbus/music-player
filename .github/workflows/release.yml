@@ -36,7 +36,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.tag || github.event.release.tag_name || github.ref }}
+          # Manual recovery builds the selected ref; tag supplies release identity.
+          ref: ${{ github.event.release.tag_name || github.ref }}
           persist-credentials: false
       - name: Resolve source and release identity
         id: meta
@@ -45,6 +46,8 @@ jobs:
           PUBLISH: ${{ github.event_name == 'release' || inputs.publish == true }}
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/release-metadata.py
+      - name: Test service installer account and policy handling
+        run: python3 scripts/test-service-install.py
       - name: Recheck Action releases and documentation
         env:
           GH_TOKEN: ${{ github.token }}

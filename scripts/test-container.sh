@@ -11,8 +11,8 @@ COPY *.deb /tmp/music-player.deb
 RUN apt-get update \
     && apt-get install -y --no-install-recommends /tmp/music-player.deb \
     && rm -rf /var/lib/apt/lists/* /tmp/music-player.deb \
-    && groupadd --gid 10001 music-player \
-    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /data music-player \
+    && groupadd --gid 10001 music-player-runtime \
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /data music-player-runtime \
     && install -d -o 10001 -g 10001 /data /data/config /data/cache /music
 DOCKER
 sed -n '/^ENV /,$p' dist/Dockerfile >> dist/build/deb-image/Dockerfile

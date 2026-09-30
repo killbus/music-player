@@ -49,40 +49,60 @@ systemctl status music-player
 journalctl -u music-player -f
 ```
 
-The service uses a non-root dynamic user. systemd manages persistent data under
-`/var/lib/music-player` and cache under `/var/cache/music-player`; its private
-directory mapping survives UID changes. Settings and SQLite share
+The DEB creates a fixed non-root music-player account. systemd manages data under
+`/var/lib/music-player` and cache under `/var/cache/music-player`. Settings and SQLite share
 `/var/lib/music-player/config/music-player`. The default music directory is
 `/var/lib/music-player/music`. For an existing library, configure
 `MUSIC_PLAYER_MUSIC_DIRECTORY=/srv/music` and grant read/traverse access, using
-`SupplementaryGroups=` in a service drop-in if required. Do not chown external
-files to a transient dynamic UID. Interactive CLI settings in your login account
+`SupplementaryGroups=` in a service drop-in if required. Grant access through groups instead of changing external file ownership. Interactive CLI settings in your login account
 are separate from the service's settings.
 
-For Snapcast, configure Snapserver to create and read a FIFO, for example:
+For example, edit `/etc/default/music-player` to change the HTTP port and
+periodic library scan interval (in minutes; `0` disables periodic scans):
 
 ```ini
-[stream]
-source = pipe:///run/snapcast/music-player.fifo?name=MusicPlayer&sampleformat=44100:16:2&codec=flac
+MUSIC_PLAYER_HTTP_PORT=8080
+MUSIC_PLAYER_LIBRARY_REFRESH_INTERVAL=10
 ```
 
-Set `MUSIC_PLAYER_AUDIO_OUTPUT=fifo:/run/snapcast/music-player.fifo` in
-`/etc/default/music-player`. Start the reader first and grant the service read
-and write access to that existing FIFO. The playback engine opens it read/write.
-For example, with an existing `snapcast` group and a FIFO with group read/write
-permissions (such as mode `0660`), use `sudo systemctl edit music-player`:
+Use `KEY=value` lines without `export`, then run
+`sudo systemctl restart music-player`. Editing this environment file does not
+require `daemon-reload`. `HTTP_PORT` controls the Web UI and HTTP API; `PORT`
+is a separate setting.
+The service grants `CAP_NET_BIND_SERVICE` to its non-root process, so an
+explicit `MUSIC_PLAYER_HTTP_PORT=80` is also supported. The default remains 5053.
+
+The complete configuration is
+`/var/lib/music-player/config/music-player/settings.toml`, normally created on
+the first successful start. Edit settings such as `http_port = 8080` there,
+including nested TOML tables, then restart the service. Environment variables
+override the corresponding TOML values. A drop-in overriding `XDG_CONFIG_HOME`
+also changes the settings file location.
+
+For Snapcast, keep Snapserver's standard `/tmp/snapfifo` source and service.
+music-player shares the host `/tmp`; it does not enable `PrivateTmp` or
+`DynamicUser`. In `/etc/default/music-player`, set:
+
+```ini
+MUSIC_PLAYER_AUDIO_OUTPUT=fifo:/tmp/snapfifo
+```
+
+Start Snapserver first, then check `ls -l /tmp/snapfifo`. The playback engine
+opens an existing FIFO read/write; it does not create it. If its permissions
+require group access, grant the service membership in the FIFO's actual group
+using `sudo systemctl edit music-player`, for example:
 
 ```ini
 [Service]
-SupplementaryGroups=snapcast
-ReadWritePaths=/run/snapcast/music-player.fifo
+SupplementaryGroups=snapserver
 ```
 
-Then restart the service. The FIFO must exist when systemd sets up the mount
-namespace; persist creation/permissions in your Snapserver setup across boots.
-For a local sound device, grant the corresponding device group instead; the
-unit does not assume Snapcast or Docker. The dynamic user's filesystem is
-read-only outside its managed state/cache and explicit writable paths.
+Use that example only when the FIFO belongs to the snapserver group and that
+group has read/write permission. Run `sudo systemctl daemon-reload` after
+changing a drop-in, then `sudo systemctl restart music-player`. No writable-path
+mount or Snapserver service override is required. Permissions must remain
+suitable when Snapserver recreates the FIFO. For local audio, grant the device
+group instead.
 
 | Package operation | Service behavior |
 | --- | --- |
@@ -96,6 +116,18 @@ Package service actions respect Debian's `policy-rc.d`. Package upgrades do not
 override administrator masks. Delete retained data explicitly only when no
 longer needed. `/etc/default/music-player` is a DEB conffile, so local edits are
 preserved by normal package upgrades.
+
+### Containers (LXC, systemd as PID 1)
+
+The unit uses a fixed account and shared temporary directories, avoiding the
+mount isolation previously implied by DynamicUser. Native CI checks that the
+service shares PID 1's mount namespace; it does not certify every LXC host
+policy. Existing administrator drop-ins can still enable isolation: inspect
+`systemctl cat music-player` and `journalctl -u music-player -b`. Do not loosen
+permissions of systemd's root-owned `/var/cache/private` directory.
+
+The service account is retained on purge alongside application data. Migration
+of state from earlier dynamic-user packages has not been validated.
 
 ## Run the published container
 

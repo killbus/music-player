@@ -1,12 +1,53 @@
 #!/bin/sh
 set -eu
 if [ "$1" = configure ]; then
+    restart_dynamic=no
+    # nss-systemd exposes the running old unit's transient user through getent.
+    # Release that identity before creating the persistent account.
+    if [ -d /run/systemd/system ] &&
+       systemctl --quiet is-active music-player.service &&
+       [ "$(systemctl show -p DynamicUser --value music-player.service)" = yes ]; then
+        deb-systemd-invoke stop music-player.service
+        if systemctl --quiet is-active music-player.service; then
+            echo 'Stop the old dynamic-user service before configuring this package' >&2
+            exit 1
+        fi
+        restart_dynamic=yes
+    fi
+    # Retain a stable identity while application data survives removal/purge.
+    if getent passwd music-player >/dev/null; then
+        account=$(getent passwd music-player)
+        account_uid=$(printf '%s' "$account" | cut -d: -f3)
+        account_home=$(printf '%s' "$account" | cut -d: -f6)
+        account_shell=$(printf '%s' "$account" | cut -d: -f7)
+        if [ "$account_uid" -eq 0 ] || [ "$account_home" != /var/lib/music-player ] ||
+           { [ "$account_shell" != /usr/sbin/nologin ] && [ "$account_shell" != /bin/false ]; }; then
+            echo 'Refusing to reuse an incompatible music-player account' >&2
+            exit 1
+        fi
+    else
+        adduser --system --group --home /var/lib/music-player --no-create-home --shell /usr/sbin/nologin music-player
+    fi
+    if ! getent group music-player >/dev/null; then
+        addgroup --system music-player
+    fi
     # Record unit links for purge without enabling the service.
     deb-systemd-helper update-state music-player.service
     if [ -d /run/systemd/system ]; then
         systemctl daemon-reload
         # Preserve both administrator choices: enabled state and running state.
-        if systemctl --quiet is-active music-player.service; then
+        if [ "$restart_dynamic" = yes ]; then
+            # Restore a previously running instance without enabling it.
+            policy_status=0
+            if [ -x /usr/sbin/policy-rc.d ]; then
+                /usr/sbin/policy-rc.d music-player.service start || policy_status=$?
+            fi
+            case "$policy_status" in
+                0|104) systemctl start music-player.service ;;
+                101) : ;;
+                *) echo "Service start policy failed: $policy_status" >&2; exit "$policy_status" ;;
+            esac
+        elif systemctl --quiet is-active music-player.service; then
             deb-systemd-invoke restart music-player.service
         fi
     fi

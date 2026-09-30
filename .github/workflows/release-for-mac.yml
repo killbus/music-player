@@ -1,5 +1,6 @@
 name: release-for-mac
 on:
+  pull_request:
   release:
     types: [created]
   workflow_dispatch:
@@ -7,31 +8,39 @@ on:
       tag:
         description: "The existing release tag to build and upload assets for (e.g. v0.2.0)"
         type: string
-        required: true
+        required: false
+      publish:
+        description: Upload missing assets to the existing release
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+  PUBLISH_RELEASE: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
+
 jobs:
   release:
     name: release ${{ matrix.target }}
-    runs-on: macos-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - x86_64-apple-darwin
-          - aarch64-apple-darwin
+        include:
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: aarch64-apple-darwin
+            os: macos-latest
 
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Set release version
-        run: echo "RELEASE_VERSION=${TAG_INPUT:-${GITHUB_REF#refs/*/}}" >> $GITHUB_ENV
+      - name: Validate release metadata
+        run: python3 scripts/release-assets.py prepare
         env:
-          TAG_INPUT: ${{ inputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Vendor DuckDB
         # `libduckdb-sys` resolves `-l static=duckdb_static` when its own crate
@@ -39,8 +48,10 @@ jobs:
         # ahead of that — so the libraries must be on disk before cargo runs at
         # all. See scripts/fetch-duckdb.sh.
         run: ./scripts/fetch-duckdb.sh
+        env:
+          CARGO_BUILD_TARGET: ${{ matrix.target }}
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
       - name: Install Rust 1.98.0
         run: |
@@ -48,7 +59,7 @@ jobs:
           rustup default 1.98.0
           rustup target add ${{ matrix.target }}
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -63,11 +74,14 @@ jobs:
       - name: Build webui
         run: |
           cd webui/musicplayer
-          bun install
+          bun install --frozen-lockfile
           bun run build
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Verify CLI startup
+        run: target/${{ matrix.target }}/release/music-player --help
 
       - name: Package binary
         run: |
@@ -75,11 +89,15 @@ jobs:
           tar czvf $ASSET.tar.gz -C target/${{ matrix.target }}/release music-player
           shasum -a 256 $ASSET.tar.gz > $ASSET.tar.gz.sha256
 
-      - name: Upload release assets
-        run: |
-          gh release upload ${{ env.RELEASE_VERSION }} \
-            music-player_${{ env.RELEASE_VERSION }}_${{ matrix.target }}.tar.gz \
-            music-player_${{ env.RELEASE_VERSION }}_${{ matrix.target }}.tar.gz.sha256 \
-            --clobber
+      - name: Save validation artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mac-cli-${{ matrix.target }}
+          path: '*.tar.gz*'
+          if-no-files-found: error
+
+      - name: Upload missing release assets
+        if: env.PUBLISH_RELEASE == 'true'
+        run: python3 scripts/release-assets.py publish '*.tar.gz*'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

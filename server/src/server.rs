@@ -2,6 +2,7 @@ use futures_channel::mpsc::{unbounded, UnboundedSender};
 use futures_util::{future, pin_mut, stream::TryStreamExt, StreamExt};
 use std::collections::HashMap;
 use std::net::SocketAddr;
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::sync::{self, Arc};
 
@@ -11,8 +12,11 @@ use music_player_settings::{read_settings, Settings};
 use music_player_storage::Database;
 use music_player_tracklist::Tracklist as TracklistState;
 use owo_colors::OwoColorize;
-use tokio::net::{TcpListener, TcpStream, UnixListener};
+#[cfg(unix)]
+use tokio::net::UnixListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::UnboundedSender as TokioUnboundedSender;
+#[cfg(unix)]
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
 use tungstenite::Message;
@@ -149,6 +153,7 @@ impl MusicPlayerServer {
         Ok(())
     }
 
+    #[cfg(unix)]
     pub async fn start_over_unix_domain_socket(
         &self,
         path: &str,

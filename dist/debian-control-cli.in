@@ -5,7 +5,7 @@ Priority: optional
 Architecture: @DEB_ARCH@
 Maintainer: Music Player contributors <tsiry.sndr@rocksky.app>
 Homepage: https://github.com/tsirysndr/music-player
-Depends: @DEPENDS@, ca-certificates, init-system-helpers (>= 1.56)
+Depends: @DEPENDS@, ca-certificates, adduser, init-system-helpers (>= 1.56)
 Conflicts: music-player
 Description: Music player daemon, terminal client and embedded Web UI
  Headless distribution without the Slint desktop application.
