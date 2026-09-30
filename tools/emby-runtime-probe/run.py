@@ -28,6 +28,7 @@ def run_case(exe, name, media, short_media, dest):
     start = time.monotonic()
     events, requests, pcm = [], [], []
     requested, stalled, release = threading.Event(), threading.Event(), threading.Event()
+    redirect_served = [False]
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen(1)
@@ -57,15 +58,26 @@ def run_case(exe, name, media, short_media, dest):
                     self.send_header("Content-Length", "0")
                     self.end_headers()
                     return
-                data = short_media if name == "short_eof" else media
+                if name == "redirect" and self.path.endswith("/redirect.mp3") and not redirect_served[0]:
+                    redirect_served[0] = True
+                    self.send_response(302)
+                    self.send_header("Location", "/finite_no_range.mp3")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    stamp("redirect_sent")
+                    return
+                data = short_media if name in ("short_eof", "truncated_body") else media
                 if name == "fake_audio":
                     data = b"<html>upstream error despite audio MIME</html>"
                 chunked = name in ("chunked", "body_stall", "body_stall_pause", "short_eof")
-                self.send_response(200)  # Range deliberately ignored
+                declared_length = len(media) if name == "truncated_body" else len(data)
+                self.send_response(206 if name == "partial_content" else 200)  # Range deliberately ignored
                 self.send_header("Content-Type", "audio/mpeg")
                 self.send_header("Connection", "close")
+                if name == "partial_content":
+                    self.send_header("Content-Range", f"bytes 0-{len(media) - 1}/{len(media)}")
                 self.send_header("Transfer-Encoding" if chunked else "Content-Length",
-                                 "chunked" if chunked else str(len(data)))
+                                 "chunked" if chunked else str(declared_length))
                 self.end_headers()
                 if name in ("body_stall", "body_stall_pause"):
                     data = data[:96000]
@@ -81,6 +93,8 @@ def run_case(exe, name, media, short_media, dest):
                     self.wfile.write(b"0\r\n\r\n")
                 else:
                     self.wfile.write(data)
+                    if name == "truncated_body":
+                        stamp("body_truncated", bytes_sent=len(data), declared_length=declared_length)
                 self.wfile.flush()
                 stamp("response_finished")
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError) as error:
@@ -139,7 +153,8 @@ def run_case(exe, name, media, short_media, dest):
         if (name.startswith("late_headers") or name.startswith("body_stall")) and not stalled.wait(5):
             raise RuntimeError("fixture did not enter intended stall")
         observation = {"late_headers": .25, "late_headers_pause": .25, "late_headers_drop": .25, "body_stall": 8, "body_stall_pause":8, "short_eof": 4,
-                       "fake_audio": 1, "header_required": 1}.get(name, 3)
+                       "fake_audio": 1, "header_required": 1,
+                       "redirect": 4, "partial_content": 4, "truncated_body": 4}.get(name, 3)
         time.sleep(observation)
         stop_ms = (time.monotonic() - start) * 1000
         stamp("stop_sent")
@@ -194,7 +209,8 @@ def main():
     parser.add_argument("--exe", type=pathlib.Path, default=ROOT / ("target/debug/emby-runtime-probe" + suffix))
     parser.add_argument("--cases", nargs="+", default=["finite_no_range", "chunked", "late_headers",
                                                         "body_stall", "header_required", "header_positive", "fake_audio", "short_eof",
-                                                        "late_headers_pause", "late_headers_drop", "body_stall_pause"])
+                                                        "late_headers_pause", "late_headers_drop", "body_stall_pause",
+                                                        "redirect", "partial_content", "truncated_body"])
     parser.add_argument("--output", type=pathlib.Path, default=ROOT / "results")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)

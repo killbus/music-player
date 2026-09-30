@@ -7,7 +7,7 @@ import sys
 root = pathlib.Path(sys.argv[1])
 report = json.loads((root / "summary.json").read_text())
 names = {"finite_no_range", "chunked", "late_headers", "body_stall", "header_required",
-         "header_positive", "fake_audio", "short_eof", "late_headers_pause", "late_headers_drop", "body_stall_pause"}
+         "header_positive", "fake_audio", "short_eof", "late_headers_pause", "late_headers_drop", "body_stall_pause", "redirect", "partial_content", "truncated_body"}
 assert len(report["cases"]) == len(names)
 cases = {c["case"]: c for c in report["cases"]}
 assert cases.keys() == names
@@ -45,7 +45,7 @@ for name, summary in cases.items():
     assert all(r["range"] is None for r in raw["requests"]), name
     pcm = sum(e["nonzero_bytes"] for e in raw["pcm"])
     assert pcm == summary["nonzero_pcm_bytes"]
-    if name in {"finite_no_range", "chunked", "header_positive", "body_stall", "body_stall_pause", "short_eof"}:
+    if name in {"finite_no_range", "chunked", "header_positive", "body_stall", "body_stall_pause", "short_eof", "truncated_body"}:
         assert pcm > 4096, (name, "missing real audio")
         assert summary["first_nonzero_pcm_ms"] < 2000, name
     else:
@@ -56,6 +56,13 @@ for name, summary in cases.items():
         assert not raw["requests"][0]["test_header_present"]
         assert any(e["detail"]["transport_terminal"] == "HttpStatus(401)" for e in sessions)
         assert any(e["detail"]["phase"] == "Failed" for e in sessions)
+    if name in {"redirect", "partial_content", "truncated_body"}:
+        expected = {"redirect": "HttpStatus(302)", "partial_content": "HttpStatus(206)",
+                    "truncated_body": "NetworkError"}[name]
+        before = [e["detail"] for e in sessions if e["ms"] < stop["ms"]]
+        assert any(s["transport_terminal"] == expected for s in before), (name, expected)
+        assert any(s["phase"] == "Failed" for s in before), (name, "error hidden")
+        assert not any(s["phase"] == "EndUnconfirmed" for s in before), (name, "error treated as EOF")
     if name.startswith("late_headers") or name.startswith("body_stall"):
         # Must have cancelled a still-live source; natural completion isn't cancellation proof.
         before = [e for e in sessions if e["ms"] < stop["ms"]]
