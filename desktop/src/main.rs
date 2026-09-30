@@ -10,6 +10,7 @@
 mod daemon;
 mod extensions;
 mod likes;
+mod media;
 mod radio;
 mod rpc;
 mod skin;
@@ -1544,6 +1545,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // The worker retries until the (embedded or external) daemon answers.
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<rpc::Cmd>();
     rpc::start(app.as_weak(), rx);
+    media::bind(&app, &tx);
 
     // macOS Now Playing center (media keys, Control Center, AirPods).
     #[cfg(target_os = "macos")]
@@ -1784,6 +1786,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 STATE.with(|s| s.borrow_mut().active_provider.clear());
                 app.set_provider_name("".into());
                 app.set_provider_url("".into());
+                media::invalidate(&app);
                 let _ = tx.send(rpc::Cmd::DisconnectProvider);
                 let (host, port) = match id.rsplit_once(':') {
                     Some((h, p)) => (h.to_string(), p.parse().unwrap_or(5051)),
@@ -1807,6 +1810,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 if let Some(srv) = srv {
                     app.set_current_tab(4);
                     app.set_server_error("".into());
+                    media::invalidate(&app);
                     let _ = tx.send(rpc::Cmd::ConnectServer(srv));
                 }
             }
@@ -2230,6 +2234,7 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     {
         let tx = tx.clone();
+        let app_weak = app.as_weak();
         app.on_server_delete(move |idx| {
             let id = STATE.with(|s| {
                 s.borrow()
@@ -2238,6 +2243,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     .map(|srv| srv.id.clone())
             });
             if let Some(id) = id {
+                media::invalidate(&app_weak.unwrap());
                 let _ = tx.send(rpc::Cmd::DeleteServer(id));
             }
         });
@@ -2285,6 +2291,7 @@ fn main() -> Result<(), slint::PlatformError> {
             app.set_provider_url("".into());
             set_active_provider("");
             refresh_servers_model(&app);
+            media::invalidate(&app);
             let _ = tx.send(rpc::Cmd::DisconnectProvider);
         });
     }
@@ -2296,6 +2303,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let srv = STATE.with(|s| s.borrow().servers.get(idx as usize).cloned());
             if let Some(srv) = srv {
                 app.set_server_error("".into());
+                media::invalidate(&app);
                 let _ = tx.send(rpc::Cmd::ConnectServer(srv));
             }
         });

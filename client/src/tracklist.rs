@@ -16,7 +16,9 @@ pub struct TracklistClient {
 impl TracklistClient {
     pub async fn new(host: String, port: u16) -> Result<Self, Error> {
         let url = format!("http://{}:{}", host, port);
-        let client = TracklistServiceClient::connect(url).await?;
+        let client = TracklistServiceClient::connect(url)
+            .await?
+            .max_decoding_message_size(music_player_server::LIBRARY_MESSAGE_LIMIT);
         Ok(Self { client })
     }
 

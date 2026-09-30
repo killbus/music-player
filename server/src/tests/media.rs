@@ -156,6 +156,19 @@ impl MusicProvider for Provider {
         if parent == "failed-page" {
             return Err(ProviderError::Other("fixture page failed".into()));
         }
+        if parent == "large-library" {
+            return Ok(page.slice(
+                (0..17_462)
+                    .map(|index| {
+                        let mut track = leaf(&self.1);
+                        let handle = source(&self.1, ResourceKind::Item, &index.to_string());
+                        track.id = handle.clone();
+                        track.uri = handle;
+                        track
+                    })
+                    .collect(),
+            ));
+        }
         Ok(vec![leaf(&self.1)])
     }
 }
@@ -171,6 +184,35 @@ struct TestServer {
     fixture: Arc<Fixture>,
     queue: Arc<Mutex<music_player_tracklist::Tracklist>>,
     task: tokio::task::JoinHandle<()>,
+}
+
+#[tokio::test]
+async fn grpc_full_container_above_default_message_limit_preserves_every_source() {
+    use prost::Message;
+    let mut server = setup(Fixture::default()).await;
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        server
+            .client
+            .get_media_container_tracks(GetMediaContainerTracksRequest {
+                server_id: "account-a".into(),
+                parent: "large-library".into(),
+                offset: 0,
+                limit: Some(0),
+            }),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .into_inner();
+    assert!(response.encoded_len() > 4 * 1024 * 1024);
+    assert_eq!(response.server_id, "account-a");
+    assert_eq!(response.tracks.len(), 17_462);
+    for (index, track) in response.tracks.iter().enumerate() {
+        let expected = source("account-a", ResourceKind::Item, &index.to_string());
+        assert_eq!(track.id, expected);
+        assert_eq!(track.uri, expected);
+    }
 }
 impl Drop for TestServer {
     fn drop(&mut self) {
@@ -201,7 +243,10 @@ async fn setup(fixture: Fixture) -> TestServer {
             .await
             .unwrap();
     });
-    let client = LibraryServiceClient::connect(endpoint).await.unwrap();
+    let client = LibraryServiceClient::connect(endpoint)
+        .await
+        .unwrap()
+        .max_decoding_message_size(crate::LIBRARY_MESSAGE_LIMIT);
     TestServer {
         client,
         providers,

@@ -54,6 +54,8 @@ const PAGE: i32 = 500;
 
 #[derive(Debug)]
 pub enum Cmd {
+    Media(crate::media::Request),
+    MediaCommit(crate::media::Commit),
     Play,
     Pause,
     Next,
@@ -509,7 +511,8 @@ async fn session(
     load_playlists(channel, weak).await;
 
     // Poll now-playing + queue until the daemon (or the target) goes away.
-    let mut tracklist = TracklistServiceClient::new(channel.clone());
+    let mut tracklist = TracklistServiceClient::new(channel.clone())
+        .max_decoding_message_size(music_player_server::LIBRARY_MESSAGE_LIMIT);
     let mut last_art: Option<String> = None;
     // The waveform is a property of the track, so it is fetched when the
     // track changes rather than on every poll — plus spaced retries while it
@@ -1574,7 +1577,8 @@ async fn load_tracks(
     if tracks.is_empty() {
         return Ok(());
     }
-    let mut tracklist = TracklistServiceClient::new(channel.clone());
+    let mut tracklist = TracklistServiceClient::new(channel.clone())
+        .max_decoding_message_size(music_player_server::LIBRARY_MESSAGE_LIMIT);
     tracklist
         .load_tracks(LoadTracksRequest {
             tracks,
@@ -2531,9 +2535,16 @@ async fn cmd_loop(
         let channel = chan();
         let mut playback = PlaybackServiceClient::new(channel.clone());
         let mut mixer = MixerServiceClient::new(channel.clone());
-        let mut tracklist = TracklistServiceClient::new(channel.clone());
+        let mut tracklist = TracklistServiceClient::new(channel.clone())
+            .max_decoding_message_size(music_player_server::LIBRARY_MESSAGE_LIMIT);
         let res: Result<(), tonic::Status> = async {
             match cmd {
+                Cmd::Media(request) => {
+                    tokio::spawn(crate::media::run(channel.clone(), weak.clone(), request));
+                }
+                Cmd::MediaCommit(request) => {
+                    crate::media::commit(&channel, &weak, request).await;
+                }
                 Cmd::Play => {
                     playback.play(PlayRequest {}).await?;
                     state.lock().await.playing = true;
@@ -3259,7 +3270,8 @@ async fn insert_track_ids(
     position: i32,
     ids: Vec<String>,
 ) -> Result<(), tonic::Status> {
-    let mut tracklist = TracklistServiceClient::new(channel.clone());
+    let mut tracklist = TracklistServiceClient::new(channel.clone())
+        .max_decoding_message_size(music_player_server::LIBRARY_MESSAGE_LIMIT);
     match position {
         -2 => {
             // PlayNext inserts right after the current track, so pushing in

@@ -139,11 +139,14 @@ impl MusicPlayerServer {
                 Arc::clone(&self.providers),
                 Arc::clone(&self.tracklist),
             )))
-            .add_service(TracklistServiceServer::new(Tracklist::new(
-                Arc::clone(&self.tracklist),
-                Arc::clone(&self.cmd_tx),
-                self.db.clone(),
-            )))
+            .add_service(
+                TracklistServiceServer::new(Tracklist::new(
+                    Arc::clone(&self.tracklist),
+                    Arc::clone(&self.cmd_tx),
+                    self.db.clone(),
+                ))
+                .max_decoding_message_size(crate::LIBRARY_MESSAGE_LIMIT),
+            )
             .add_service(AnalysisServiceServer::new(self.analysis()))
             .add_service(AnalyticsServiceServer::new(
                 crate::analytics::Analytics::new(self.db.clone()),
@@ -197,11 +200,14 @@ impl MusicPlayerServer {
                 Arc::clone(&self.providers),
                 Arc::clone(&self.tracklist),
             )))
-            .add_service(TracklistServiceServer::new(Tracklist::new(
-                Arc::clone(&self.tracklist),
-                Arc::clone(&self.cmd_tx),
-                self.db.clone(),
-            )))
+            .add_service(
+                TracklistServiceServer::new(Tracklist::new(
+                    Arc::clone(&self.tracklist),
+                    Arc::clone(&self.cmd_tx),
+                    self.db.clone(),
+                ))
+                .max_decoding_message_size(crate::LIBRARY_MESSAGE_LIMIT),
+            )
             .add_service(AnalysisServiceServer::new(self.analysis()))
             .add_service(AnalyticsServiceServer::new(
                 crate::analytics::Analytics::new(self.db.clone()),

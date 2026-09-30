@@ -13,8 +13,9 @@ import {
     ExtensionItem, ExtensionRow,
     StatItem, StatRow, StatCard, ClockHeatmap, HeatCell, BarChart, RankChart, ChartBar} from "components.slint";
 import { Icons } from "icons.slint";
+import { MediaBrowser, MediaItem, MediaCrumb } from "media-browser.slint";
 
-export { Theme }
+export { Theme, MediaItem, MediaCrumb }
 
 export component AppWindow inherits Window {
     title: "Music Player";
@@ -30,6 +31,24 @@ export component AppWindow inherits Window {
     in-out property <[ArtistItem]> artists: [];
     in-out property <[TrackItem]> tracks: [];
     in-out property <[TrackItem]> liked: [];
+
+    // Media models and row indices belong to the Rust browser controller.
+    in-out property <[MediaItem]> media-items: [];
+    in-out property <[MediaCrumb]> media-crumbs: [];
+    in-out property <bool> media-loading: false;
+    in-out property <bool> media-busy: false;
+    in-out property <bool> media-cancellable: false;
+    in-out property <string> media-message: "";
+    in-out property <string> media-offset-text: "";
+    in-out property <bool> media-has-next: false;
+    in-out property <bool> media-has-previous: false;
+    callback media-refresh();
+    callback media-open(int);
+    callback media-breadcrumb(int);
+    callback media-page(bool);
+    callback media-play(int);
+    callback media-enqueue(int);
+    callback media-cancel();
 
     // ── Now playing ─────────────────────────────────────────────────────────
     in-out property <string> now-title: "Nothing playing";
@@ -105,7 +124,7 @@ export component AppWindow inherits Window {
 
     // ── App state ───────────────────────────────────────────────────────────
     // 0 albums, 1 artists, 2 tracks, 3 liked, 4 servers, 5 playlists,
-    // 6 radio, 7 extensions, 8 most played, 9 statistics
+    // 6 radio, 7 extensions, 8 most played, 9 statistics, 10 media libraries
     in-out property <int> current-tab: 0;
     // ── Analytics ───────────────────────────────────────────────────────────
     in-out property <[StatItem]> most-played: [];
@@ -832,6 +851,17 @@ export component AppWindow inherits Window {
                     clicked => { root.current-tab = 2; root.show-detail = false; root.show-artist = false; }
                 }
                 SidebarItem {
+                    icon: Icons.folder;
+                    label: "Media libraries";
+                    active: root.current-tab == 10;
+                    clicked => {
+                        root.current-tab = 10;
+                        root.show-detail = false;
+                        root.show-artist = false;
+                        root.media-refresh();
+                    }
+                }
+                SidebarItem {
                     icon: Icons.heart;
                     label: "Liked";
                     active: root.current-tab == 3;
@@ -1115,6 +1145,7 @@ export component AppWindow inherits Window {
                             : root.current-tab == 7 ? "Extensions"
                             : root.current-tab == 8 ? "Most Played"
                             : root.current-tab == 9 ? "Statistics"
+                            : root.current-tab == 10 ? "Media libraries"
                             : "Servers";
                         color: Theme.text;
                         font-size: 20px;
@@ -1179,6 +1210,28 @@ export component AppWindow inherits Window {
             content := Rectangle {
                 background: Theme.window-bg;
                 vertical-stretch: 1;
+
+                if root.current-tab == 10 && !root.show-detail && !root.show-artist : MediaBrowser {
+                    x: 24px;
+                    width: parent.width - 48px;
+                    height: parent.height;
+                    items: root.media-items;
+                    crumbs: root.media-crumbs;
+                    loading: root.media-loading;
+                    busy: root.media-busy;
+                    cancellable: root.media-cancellable;
+                    message: root.media-message;
+                    offset-text: root.media-offset-text;
+                    has-next: root.media-has-next;
+                    has-previous: root.media-has-previous;
+                    refresh => { root.media-refresh(); }
+                    open(index) => { root.media-open(index); }
+                    breadcrumb(index) => { root.media-breadcrumb(index); }
+                    page(forward) => { root.media-page(forward); }
+                    play(index) => { root.media-play(index); }
+                    enqueue(index) => { root.media-enqueue(index); }
+                    cancel => { root.media-cancel(); }
+                }
 
                 // Albums grid — placeholders while the first fetch is out.
                 if root.current-tab == 0 && root.library-loading : Rectangle {
