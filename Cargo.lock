@@ -8194,6 +8194,7 @@ name = "music-player"
 version = "0.4.5"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "crossterm 0.29.0",
  "dirs",
