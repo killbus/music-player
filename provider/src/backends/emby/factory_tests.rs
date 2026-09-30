@@ -56,9 +56,17 @@ impl Request {
         }
     }
 
+    fn empty_query_target(&self, expected: &str) {
+        // URL serialization may retain a trailing `?` for an empty query.
+        // Check the endpoint and lack of parameters independently.
+        let (path, query) = self.target.split_once('?').unwrap_or((&self.target, ""));
+        assert_eq!(path, expected);
+        assert!(query.is_empty(), "unexpected endpoint query");
+    }
+
     fn empty_password(&self) {
         assert_eq!(self.method, "POST");
-        assert_eq!(self.target, "/Users/AuthenticateByName");
+        self.empty_query_target("/Users/AuthenticateByName");
         let body: Value = serde_json::from_slice(&self.body).unwrap();
         assert!(body == json!({"Username": "family", "Pw": ""}));
         assert!(!self.headers.contains_key("x-emby-token"));
@@ -236,7 +244,7 @@ async fn factory_forwards_device_and_token_through_cross_origin_identity_redirec
             request.client_identity(Some(DEVICE));
             let request = origin.reply(302, Some(&location), Value::Null).await;
             assert_eq!(request.method, "GET");
-            assert_eq!(request.target, "/System/Info");
+            request.empty_query_target("/System/Info");
             request.session();
             let request = target.reply(200, None, json!({"Id": "server-a"})).await;
             assert_eq!(request.method, "GET");
@@ -275,7 +283,7 @@ async fn factory_redirect_opt_out_fails_connection_without_contacting_target() {
             request.empty_password();
             request.client_identity(Some(DEVICE));
             let request = origin.reply(302, Some(&location), Value::Null).await;
-            assert_eq!(request.target, "/System/Info");
+            request.empty_query_target("/System/Info");
             request.session();
         });
         let error = result
