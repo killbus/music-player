@@ -33,11 +33,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!(%error, "legacy saved account import will retry next startup");
     }
 
-    let (_, _) = Player::new(
+    let (_, _) = Player::with_source_resolver(
         |_| {},
         Arc::clone(&cmd_tx),
         Arc::clone(&cmd_rx),
         Arc::clone(&tracklist),
+        music_player_playback::source_resolver::SourceResolver::from_settings(db.clone()),
     );
 
     // One provider registry per process, shared by the gRPC server and the

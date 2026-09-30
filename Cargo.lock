@@ -8477,14 +8477,20 @@ dependencies = [
  "async-trait",
  "futures-util",
  "music-player-entity",
+ "music-player-migration",
+ "music-player-provider",
  "music-player-settings",
  "music-player-storage",
  "music-player-tracklist",
+ "music-player-transport",
+ "music-player-types",
  "rockbox-playback",
+ "sea-orm",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -8660,6 +8666,14 @@ dependencies = [
  "atlist-rs",
  "music-player-entity",
  "rand 0.8.8",
+]
+
+[[package]]
+name = "music-player-transport"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.12.28",
+ "tokio",
 ]
 
 [[package]]

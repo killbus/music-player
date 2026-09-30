@@ -1,9 +1,13 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use music_player_entity::{album, artist, track};
-use music_player_playback::player::PlayerCommand;
+use music_player_playback::{
+    player::{normalize_queue, PlayerCommand},
+    source_resolver::SourceResolver,
+};
 use music_player_storage::Database;
 use music_player_tracklist::Tracklist as TracklistState;
+use music_player_types::source::SourceRef;
 use sea_orm::EntityTrait;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -36,6 +40,42 @@ impl Tracklist {
     ) -> Self {
         Self { state, cmd_tx, db }
     }
+
+    // Validate every entry before any command. Full metadata batches need only
+    // a saved-account check; the player reauthenticates when opening a source.
+    async fn validate_queue(&self, tracks: &mut [track::Model]) -> Result<(), tonic::Status> {
+        normalize_queue(tracks).map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
+        let mut checked = HashSet::new();
+        for track in tracks {
+            if SourceRef::is_handle(&track.id) {
+                let source = SourceRef::parse(&track.id)
+                    .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
+                if checked.insert((source.account_id.clone(), source.remote.clone())) {
+                    SourceResolver::from_settings(self.db.clone())
+                        .validate_saved(&source)
+                        .await
+                        .map_err(|e| tonic::Status::failed_precondition(e.to_string()))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn resolve_source_track(&self, track: &mut track::Model) -> Result<bool, tonic::Status> {
+        normalize_queue(std::slice::from_mut(track))
+            .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
+        if !SourceRef::is_handle(&track.id) {
+            return Ok(false);
+        }
+        let source = SourceRef::parse(&track.id)
+            .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
+        *track = SourceResolver::from_settings(self.db.clone())
+            .track(&source)
+            .await
+            .map_err(|e| tonic::Status::failed_precondition(e.to_string()))?
+            .into();
+        Ok(true)
+    }
 }
 
 #[tonic::async_trait]
@@ -44,8 +84,23 @@ impl TracklistService for Tracklist {
         &self,
         request: tonic::Request<AddTrackRequest>,
     ) -> Result<tonic::Response<AddTrackResponse>, tonic::Status> {
-        let song = request.get_ref().track.as_ref().unwrap();
-        let id = song.clone().id;
+        let song = request
+            .into_inner()
+            .track
+            .ok_or_else(|| tonic::Status::invalid_argument("Track is required"))?;
+        let mut song: track::Model = song.into();
+        if self.resolve_source_track(&mut song).await? {
+            self.cmd_tx
+                .lock()
+                .unwrap()
+                .send(PlayerCommand::LoadTracklist {
+                    tracks: vec![song],
+                    start_index: None,
+                })
+                .map_err(|_| tonic::Status::unavailable("Player command channel closed"))?;
+            return Ok(tonic::Response::new(AddTrackResponse {}));
+        }
+        let id = song.id;
 
         let result: Vec<(track::Model, Vec<artist::Model>)> = track::Entity::find_by_id(id.clone())
             .find_with_related(artist::Entity)
@@ -66,7 +121,9 @@ impl TracklistService for Tracklist {
                 .await
                 .map_err(|e| tonic::Status::internal(e.to_string()))?;
         let (_, album) = result.into_iter().next().unwrap();
-        track.album = album.unwrap();
+        track.album = album.unwrap_or_default();
+        self.validate_queue(std::slice::from_mut(&mut track))
+            .await?;
 
         self.cmd_tx
             .lock()
@@ -92,12 +149,14 @@ impl TracklistService for Tracklist {
         &self,
         request: tonic::Request<AddTracksRequest>,
     ) -> Result<tonic::Response<AddTracksResponse>, tonic::Status> {
-        let tracks = request
+        let mut tracks = request
             .into_inner()
             .tracks
             .into_iter()
             .map(Into::into)
             .collect::<Vec<track::Model>>();
+
+        self.validate_queue(&mut tracks).await?;
 
         if !tracks.is_empty() {
             self.cmd_tx
@@ -238,24 +297,20 @@ impl TracklistService for Tracklist {
         &self,
         request: tonic::Request<PlayNextRequest>,
     ) -> Result<tonic::Response<PlayNextResponse>, tonic::Status> {
-        let track = request.into_inner().track;
-        if track.is_none() {
-            return Err(tonic::Status::invalid_argument("Track is required"));
-        }
-
-        let track = track.unwrap();
-
+        let track = request
+            .into_inner()
+            .track
+            .ok_or_else(|| tonic::Status::invalid_argument("Track is required"))?;
+        let mut track: track::Model = track.into();
+        self.resolve_source_track(&mut track).await?;
         if track.uri.is_empty() {
             return Err(tonic::Status::invalid_argument("Track URI is required"));
         }
-
-        let track = track.into();
-
         self.cmd_tx
             .lock()
             .unwrap()
             .send(PlayerCommand::PlayNext(track))
-            .unwrap();
+            .map_err(|_| tonic::Status::unavailable("Player command channel closed"))?;
         let response = PlayNextResponse {};
         Ok(tonic::Response::new(response))
     }
@@ -279,36 +334,34 @@ impl TracklistService for Tracklist {
         request: tonic::Request<LoadTracksRequest>,
     ) -> Result<tonic::Response<LoadTracksResponse>, tonic::Status> {
         let request = request.into_inner();
-        let tracks = request
-            .tracks
-            .into_iter()
-            .map(Into::into)
-            .collect::<Vec<track::Model>>();
-        let start_index = request.start_index as usize;
+        let mut tracks: Vec<track::Model> = request.tracks.into_iter().map(Into::into).collect();
+        self.validate_queue(&mut tracks).await?;
+        let start_index = usize::try_from(request.start_index)
+            .map_err(|_| tonic::Status::invalid_argument("Invalid start index"))?;
+        if start_index >= tracks.len() {
+            return Err(tonic::Status::invalid_argument("Invalid start index"));
+        }
 
-        self.cmd_tx
-            .lock()
-            .unwrap()
+        // One lock for the whole replacement: concurrent requests cannot put
+        // another Clear or Load between this request's commands.
+        let cmd_tx = self.cmd_tx.lock().unwrap();
+        cmd_tx
             .send(PlayerCommand::Stop)
-            .unwrap();
-        self.cmd_tx
-            .lock()
-            .unwrap()
+            .map_err(|_| tonic::Status::unavailable("Player command channel closed"))?;
+        cmd_tx
             .send(PlayerCommand::Clear)
-            .unwrap();
-        // One command, so the engine opens the wanted track's stream once.
-        // This used to load the tracklist — which starts the first track — and
-        // then ask for the wanted index, opening two remote streams for every
-        // play.
-        self.cmd_tx
-            .lock()
-            .unwrap()
+            .map_err(|_| tonic::Status::unavailable("Player command channel closed"))?;
+        cmd_tx
             .send(PlayerCommand::LoadTracklist {
                 tracks,
                 start_index: Some(start_index),
             })
-            .unwrap();
+            .map_err(|_| tonic::Status::unavailable("Player command channel closed"))?;
         let response = LoadTracksResponse {};
         Ok(tonic::Response::new(response))
     }
 }
+
+#[cfg(test)]
+#[path = "tracklist/source_tests.rs"]
+mod source_tests;

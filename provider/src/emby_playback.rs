@@ -8,7 +8,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use url::Url;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, Deserialize)]
 pub enum AudioSelection {
     #[default]
     Auto,
@@ -21,7 +21,7 @@ pub enum AudioSelection {
 
 /// Stable selection for one queue occurrence. The descriptor detects known
 /// metadata changes; it is NOT proof that the underlying media bytes are equal.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, Deserialize)]
 pub struct AudioPin {
     pub media_source_id: String,
     pub audio_stream_index: i32,

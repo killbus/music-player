@@ -105,6 +105,9 @@ pub struct Settings {
     /// Where decoded audio is sent: "cpal" (system audio device, default),
     /// "stdout", "fifo:/path/to/pipe", "unix:/path/to/socket" or "tcp:host:port".
     pub audio_output: String,
+    /// Follow Emby redirects, retaining authentication headers across origins.
+    #[serde(default = "default_true")]
+    pub emby_follow_redirects: bool,
     /// How often (in minutes) the music directory is rescanned in the
     /// background. 0 disables periodic refresh.
     pub library_refresh_interval: u64,
@@ -261,6 +264,7 @@ pub fn read_settings() -> Result<Config, ConfigError> {
         device_id,
         http_port: 5053,
         audio_output: "cpal".to_string(),
+        emby_follow_redirects: true,
         library_refresh_interval: 30,
         radio_browser_url: DEFAULT_RADIO_BROWSER_URL.to_string(),
         tunein_url: DEFAULT_TUNEIN_URL.to_string(),
@@ -309,6 +313,7 @@ pub fn read_settings() -> Result<Config, ConfigError> {
         .set_default("device_id", default_settings.device_id)?
         .set_default("http_port", default_settings.http_port)?
         .set_default("audio_output", default_settings.audio_output)?
+        .set_default("emby_follow_redirects", true)?
         .set_default(
             "library_refresh_interval",
             default_settings.library_refresh_interval,

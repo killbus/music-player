@@ -488,7 +488,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cloned_cmd_rx = Arc::clone(&cmd_rx);
     let cmd_tx_ws = Arc::clone(&cloned_cmd_tx);
     let cmd_tx_webui = Arc::clone(&cloned_cmd_tx);
-    let (_, _) = Player::new(
+    let (_, _) = Player::with_source_resolver(
         move |event| {
             let peers = cloned_peer_map.lock().unwrap();
 
@@ -544,6 +544,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cloned_cmd_tx,
         cloned_cmd_rx,
         Arc::clone(&tracklist),
+        music_player_playback::source_resolver::SourceResolver::from_settings(db.clone()),
     );
 
     let err = parsed.err().unwrap().to_string();
