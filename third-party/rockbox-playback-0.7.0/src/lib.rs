@@ -38,7 +38,10 @@ pub mod adaptive;
 mod crossfade;
 pub mod m3u;
 mod managed;
-pub use managed::{StreamPhase, StreamReadEnd, StreamSession, StreamSnapshot};
+pub use managed::{
+    StreamOutputBoundary, StreamOutputSnapshot, StreamPhase, StreamReadEnd, StreamSession,
+    StreamSnapshot,
+};
 pub mod output;
 mod resume;
 pub mod source;
@@ -859,6 +862,8 @@ struct Shared {
     next_generation: AtomicU64,
     // ring also gates revocation and final nonblocking writes.
     output_generation: AtomicU64,
+    output_session: Mutex<Option<StreamSession>>,
+    output_boundary: StreamOutputBoundary,
     output_epoch: AtomicU64,
     output_nonblocking: bool,
     output_backpressure: AtomicU64,
@@ -873,9 +878,19 @@ impl Shared {
         let mut ring = self.ring.lock().unwrap();
         if self.output_generation.load(Ordering::Relaxed) == generation {
             self.output_generation.store(0, Ordering::Relaxed);
+            self.output_session.lock().unwrap().take();
             self.output_epoch.fetch_add(1, Ordering::Relaxed);
             self.target_amp.store(0f32.to_bits(), Ordering::Relaxed);
             ring.clear();
+        }
+    }
+
+    // Called under the ring/output gate, after actual output acceptance.
+    fn record_stream_output(&self, frames: usize) {
+        if frames > 0 {
+            if let Some(session) = self.output_session.lock().unwrap().as_ref() {
+                session.record_output(frames);
+            }
         }
     }
 
@@ -1087,6 +1102,15 @@ impl Player {
             old.cancel();
         }
         let generation = self.shared.next_generation.fetch_add(1, Ordering::Relaxed);
+        let weak = Arc::downgrade(&self.shared);
+        let input =
+            managed::StreamInput::new(reader, format_ext, metadata, generation, wake, move || {
+                if let Some(shared) = weak.upgrade() {
+                    shared.revoke_output(generation);
+                }
+            });
+        let session = input.session.clone();
+        session.configure_output(self.sample_rate(), self.shared.output_boundary);
         {
             let mut ring = self.shared.ring.lock().unwrap();
             ring.clear();
@@ -1096,16 +1120,9 @@ impl Player {
             self.shared
                 .output_generation
                 .store(generation, Ordering::Relaxed);
+            *self.shared.output_session.lock().unwrap() = Some(session.clone());
             self.shared.output_epoch.fetch_add(1, Ordering::Relaxed);
         }
-        let weak = Arc::downgrade(&self.shared);
-        let input =
-            managed::StreamInput::new(reader, format_ext, metadata, generation, wake, move || {
-                if let Some(shared) = weak.upgrade() {
-                    shared.revoke_output(generation);
-                }
-            });
-        let session = input.session.clone();
         *active = Some(session.clone());
         let _ = self.tx.send(Command::OpenStream(input));
         session
@@ -1577,6 +1594,12 @@ fn make_shared(config: &PlayerConfig, rate: u32) -> Arc<Shared> {
         managed: Mutex::new(None),
         next_generation: AtomicU64::new(1),
         output_generation: AtomicU64::new(0),
+        output_session: Mutex::new(None),
+        output_boundary: match config.output {
+            OutputConfig::Cpal => StreamOutputBoundary::DeviceBuffer,
+            OutputConfig::Stdout => StreamOutputBoundary::Unavailable,
+            _ => StreamOutputBoundary::ByteStream,
+        },
         output_epoch: AtomicU64::new(0),
         output_nonblocking: matches!(
             config.output,
@@ -1673,6 +1696,7 @@ fn spawn_stream_writer(
                 let gain_l = f32::from_bits(shared.balance_gain_l.load(Ordering::Relaxed));
                 let gain_r = f32::from_bits(shared.balance_gain_r.load(Ordering::Relaxed));
 
+                let mut media_frames = 0;
                 if target == 0.0 && cur_amp == 0.0 {
                     // Paused/stopped: emit silence, freeze the ring.
                     buf.iter_mut().for_each(|b| *b = 0);
@@ -1687,6 +1711,9 @@ fn spawn_stream_writer(
                         if cur_amp == 0.0 && target == 0.0 {
                             frame.fill(0);
                             continue;
+                        }
+                        if ring.len() >= 2 {
+                            media_frames += 1;
                         }
                         let l = ring.pop_front().unwrap_or(0);
                         let r = ring.pop_front().unwrap_or(0);
@@ -1712,6 +1739,7 @@ fn spawn_stream_writer(
                     match write_output_chunk(
                         &mut *writer,
                         &buf,
+                        media_frames,
                         epoch,
                         &shared,
                         &stop_thread,
@@ -1761,12 +1789,15 @@ fn spawn_stream_writer(
 fn write_output_chunk(
     writer: &mut dyn Write,
     pcm: &[u8],
+    media_frames: usize,
     epoch: u64,
     shared: &Shared,
     stop: &AtomicBool,
     wire_offset: &mut usize,
 ) -> std::io::Result<bool> {
-    let mut pending = vec![0; (4 - *wire_offset) % 4];
+    debug_assert!(media_frames <= pcm.len() / 4);
+    let padding = (4 - *wire_offset) % 4;
+    let mut pending = vec![0; padding];
     pending.extend_from_slice(pcm);
     let mut offset = 0;
     while offset < pending.len() {
@@ -1780,6 +1811,11 @@ fn write_output_chunk(
             }
             let result = writer.write(&pending[offset..]);
             if let Ok(count) = result {
+                // Count only fully accepted media frames. A partial old frame,
+                // alignment padding and synthesized underrun silence add no time.
+                let before = (offset.saturating_sub(padding) / 4).min(media_frames);
+                let after = ((offset + count).saturating_sub(padding) / 4).min(media_frames);
+                shared.record_stream_output(after - before);
                 shared
                     .output_bytes
                     .fetch_add(count as u64, Ordering::Relaxed);
@@ -1958,6 +1994,7 @@ fn build_stream(
                     shared.set_levels(Levels::default());
                     return;
                 }
+                let mut media_frames = 0;
                 for frame in data.chunks_mut(2) {
                     if cur_amp < target {
                         cur_amp = (cur_amp + step).min(target);
@@ -1969,6 +2006,9 @@ fn build_stream(
                     if cur_amp == 0.0 && target == 0.0 {
                         frame.fill(0.0);
                         continue;
+                    }
+                    if ring.len() >= 2 && frame.len() == 2 {
+                        media_frames += 1;
                     }
                     let l = ring.pop_front().unwrap_or(0);
                     let r = ring.pop_front().unwrap_or(0);
@@ -1986,6 +2026,7 @@ fn build_stream(
                         (frame[0] + frame.get(1).copied().unwrap_or(frame[0])) * 0.5,
                     );
                 }
+                shared.record_stream_output(media_frames);
                 shared.set_levels(meter.take());
             },
             err_fn,

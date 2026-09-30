@@ -123,6 +123,9 @@ def run_harness(exe_path):
             time.sleep(0.05)
         drop_sent = None
         if blocked_event is not None:
+            # The receiver still never reads. Observe the media clock once
+            # actual kernel backpressure has persisted beyond one output chunk.
+            time.sleep(0.3)
             drop_sent = round((time.monotonic() - start) * 1000, 2)
             proc.stdin.write("drop\n")
             proc.stdin.flush()
@@ -158,6 +161,19 @@ def run_harness(exe_path):
         nonzero_bytes_written = last_detail.get("nonzero_bytes_written", 0)
         blocked_count = (blocked_event["detail"]["backpressure_events"]
                          if blocked_event else 0)
+        clocks = [e["detail"] for e in sessions]
+        blocked_clocks = [e["detail"] for e in sessions
+                          if blocked_event is not None and drop_called_at is not None
+                          and blocked_event["ms"] + 50 <= e["ms"] < drop_called_at["ms"]]
+        frames = [c.get("output_frames", -1) for c in clocks]
+        clock_schema = bool(clocks) and all(
+            c.get("output_boundary") == "ByteStream"
+            and c.get("output_generation") == c.get("generation")
+            and c.get("output_sample_rate") == 44100
+            and isinstance(c.get("output_frames"), int)
+            and c["output_frames"] >= 0
+            and c.get("output_duration_ns") == c["output_frames"] * 1_000_000_000 // 44100
+            for c in clocks)
         fixture_sha256 = hashlib.sha256(fixture_path.read_bytes()).hexdigest()
         exe_sha256 = hashlib.sha256(exe_path.read_bytes()).hexdigest()
         checks = {
@@ -166,6 +182,11 @@ def run_harness(exe_path):
                                    and blocked_event.get("detail", {}).get("nonblocking") is True,
             "nonzero_bytes_written": bytes_written > 0 and nonzero_bytes_written > 0,
             "session_present": len(sessions) >= 1,
+            "clock_schema": clock_schema,
+            "clock_monotonic": bool(frames) and frames == sorted(frames),
+            "clock_excludes_silence": bool(frames) and 0 < frames[-1] * 4 <= bytes_written,
+            "clock_frozen_while_blocked_and_after_drop": len(blocked_clocks) >= 3
+                and all(c.get("output_frames") == frames[-1] for c in blocked_clocks),
             "final_session_released": final_session_released,
             "exit_zero": proc.returncode == 0,
             "no_watchdog": not watchdog_killed,
@@ -190,6 +211,9 @@ def run_harness(exe_path):
                         "drop_join_latency_ms": drop_latency,
                         "drop_sent_observer_ms": drop_sent,
                         "session_count": len(sessions),
+                        "output_frames": frames[-1] if frames else None,
+                        "blocked_clock_samples": len(blocked_clocks),
+                        "final_session": final_session,
                         "final_session_released": final_session_released,
                         "watchdog_killed": watchdog_killed,
                         "stderr": stderr_lines,
@@ -211,7 +235,7 @@ def run_harness(exe_path):
             "note": ("FIFO read fd was opened non-blocking and deliberately never "
                      "read; it stays open across the whole child lifetime so "
                      "backpressure removal cannot fake a pass. output counters are "
-                     "lifetime byte-stream delivery observations, not consumed "
+                     "byte-stream delivery observations, not consumed "
                      "time. the two-second exit gate is validated from child event "
                      "timestamps; the five-second watchdog is cleanup only.")}
         results_dir = ROOT / "results"

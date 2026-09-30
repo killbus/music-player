@@ -2,6 +2,7 @@
 use crate::Metadata;
 use std::io::{self, Read};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamPhase {
@@ -32,8 +33,40 @@ pub struct StreamSnapshot {
     /// Codec's own exit status, independent of transport/completion evidence.
     pub decoder_status: Option<i32>,
 }
+/// Where output frames were observed. Neither boundary confirms audibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamOutputBoundary {
+    Unavailable,
+    ByteStream,
+    DeviceBuffer,
+}
+
+/// Per-generation post-DSP output, excluding underrun silence and wire padding.
+/// This is output time, not a source checkpoint: pitch/rate mapping and receiver
+/// consumption belong to the host. Retained sessions keep their own final count.
+#[derive(Debug, Clone, Copy)]
+pub struct StreamOutputSnapshot {
+    pub generation: u64,
+    pub boundary: StreamOutputBoundary,
+    pub frames: u64,
+    pub sample_rate: u32,
+}
+impl StreamOutputSnapshot {
+    pub fn duration(&self) -> Option<Duration> {
+        if self.boundary == StreamOutputBoundary::Unavailable || self.sample_rate == 0 {
+            return None;
+        }
+        let rate = u64::from(self.sample_rate);
+        Some(
+            Duration::from_secs(self.frames / rate)
+                + Duration::from_nanos((self.frames % rate) * 1_000_000_000 / rate),
+        )
+    }
+}
+
 struct Inner {
     state: Mutex<StreamSnapshot>,
+    output: Mutex<StreamOutputSnapshot>,
     wake: Box<dyn Fn() + Send + Sync>,
     // Only explicit cancellation revokes output. Normal reader EOF/drop
     // must allow already decoded PCM to drain.
@@ -45,6 +78,18 @@ pub struct StreamSession(Arc<Inner>);
 impl StreamSession {
     pub fn snapshot(&self) -> StreamSnapshot {
         self.0.state.lock().unwrap().clone()
+    }
+    pub fn output_snapshot(&self) -> StreamOutputSnapshot {
+        *self.0.output.lock().unwrap()
+    }
+    pub(crate) fn configure_output(&self, sample_rate: u32, boundary: StreamOutputBoundary) {
+        let mut output = self.0.output.lock().unwrap();
+        output.sample_rate = sample_rate;
+        output.boundary = boundary;
+    }
+    pub(crate) fn record_output(&self, frames: usize) {
+        let mut output = self.0.output.lock().unwrap();
+        output.frames = output.frames.saturating_add(frames as u64);
     }
     pub fn generation(&self) -> u64 {
         self.0.state.lock().unwrap().generation
@@ -112,6 +157,12 @@ impl StreamInput {
                 reader_released: false,
                 decoder_joined: false,
                 decoder_status: None,
+            }),
+            output: Mutex::new(StreamOutputSnapshot {
+                generation,
+                boundary: StreamOutputBoundary::Unavailable,
+                frames: 0,
+                sample_rate: 0,
             }),
             wake: Box::new(wake),
             revoke_output: Box::new(revoke_output),

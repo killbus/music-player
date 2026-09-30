@@ -25,3 +25,17 @@ writer, not blocking socket construction, stdout, CPAL, or receiver consumption.
 TCP delivery, decoder elapsed time and ring drain are not proof of audible consumption. No automatic media completion is claimed;
 short clean decoder EOF retains position as EndUnconfirmed. ServerOffset resume
 requires a future host resolver to supply a fresh pinned stream and checkpoint.
+
+The replacement binary and replacement.py exercise public Player A-to-B switches
+using distinct 440/880 Hz MP3 sources. One case starts with confirmed A delivery;
+the other holds A response headers until its resources have been reclaimed.
+Both require fresh B audio within two seconds, sustained B after cancelling the
+retained A handle again, and bounded Player Drop. Raw PCM, frequency windows,
+requests, control events and hashes are saved alongside replacement.json even
+on failure. The workflow builds both probe binaries before running the harness.
+
+StreamSession output snapshots count complete post-DSP media frames per
+generation. FIFO evidence checks a frozen clock under backpressure; replacement
+evidence checks independent A/B clocks and retained A counts. Alignment padding,
+underrun silence and cancelled partial frames are excluded; silent media counts.
+These are output durations, not source checkpoints or receiver consumption.

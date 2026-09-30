@@ -96,6 +96,9 @@ jobs:
       - name: Check redirect following and header forwarding
         timeout-minutes: 2
         run: cargo +1.96.0 test --locked --manifest-path "$PROBE_DIR/Cargo.toml" -p music-player-transport --test redirects 2>&1 | tee "$PROBE_DIR/results/redirect-tests.log"
+      - name: Verify public Player replacement and stale cancellation
+        timeout-minutes: 2
+        run: python3 "$PROBE_DIR/replacement.py" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Run FIFO backpressure and Drop experiment
         timeout-minutes: 1
         run: python3 "$PROBE_DIR/output.py" | tee -a "$GITHUB_STEP_SUMMARY"

@@ -21,6 +21,7 @@ fn snapshot(
 ) -> bool {
     let s = session.snapshot();
     let t = transport.snapshot();
+    let output = session.output_snapshot();
     emit(
         start,
         "session",
@@ -28,7 +29,10 @@ fn snapshot(
         "read_end":format!("{:?}",s.read_end), "cancel_requested":s.cancel_requested,
         "reader_released":s.reader_released,"decoder_joined":s.decoder_joined,
         "decoder_status":s.decoder_status,"transport_terminal":format!("{:?}",t.terminal),
-        "worker_exited":t.worker_exited}),
+        "worker_exited":t.worker_exited,
+        "output_generation": output.generation, "output_boundary":format!("{:?}",output.boundary),
+        "output_frames":output.frames, "output_sample_rate":output.sample_rate,
+        "output_duration_ns":output.duration().map(|d| d.as_nanos())}),
     );
     s.reader_released && s.decoder_joined && t.worker_exited
 }

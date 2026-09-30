@@ -31,6 +31,16 @@ connect/accept during construction is also still blocking. CPAL callback buffers
 already handed to the device and bytes already accepted by a kernel/receiver
 cannot be retracted by clearing the local ring.
 
-Confirmed consumption clocks, latest-intent coordination, multi-generation
-output verification and all real Emby acceptance remain separate M1b/M2/M6 gates.
-A successful TCP/FIFO fixture is not evidence for those guarantees.
+StreamSession::output_snapshot records complete post-DSP media frames per
+generation, excluding underrun silence, alignment padding and cancelled partial
+frames. ByteStream means kernel acceptance; DeviceBuffer means CPAL callback
+submission. Stdout is Unavailable. Output duration is not a source checkpoint:
+the host still needs to map pitch/rate and account for receiver buffering.
+Retained cancelled sessions keep their final count while newer sessions advance.
+
+The public Player replacement fixture uses distinct 440/880 Hz sources, including
+a source stalled before response headers. It checks B audio, cancellation of A,
+late cancellation of A while B continues, and resource joins. FIFO evidence checks
+that the session clock freezes during backpressure and survives Drop.
+Confirmed consumption clocks, latest-intent coordination, TCP/Unix backpressure
+and all real Emby acceptance remain separate M1b/M2/M6 gates.
