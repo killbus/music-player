@@ -2,6 +2,8 @@
 """Install the real DEB on an ephemeral systemd CI runner and test lifecycle."""
 import array
 import json
+import grp
+import pwd
 import math
 import os
 from pathlib import Path
@@ -59,7 +61,7 @@ def main():
     evidence = Path('dist/build/evidence')
     evidence.mkdir(parents=True, exist_ok=True)
     report = {}
-    pipes = Path('/run/music-player-ci')
+    pipes = Path('/tmp/music-player-ci')
     media = Path('/srv/music-player-ci')
     fd = None
     reader_done = threading.Event()
@@ -78,8 +80,11 @@ def main():
         pipes.mkdir(mode=0o755)
         media.mkdir(mode=0o755)
         fifo = pipes / 'probe.fifo'
-        os.mkfifo(fifo, 0o666)
-        fifo.chmod(0o666)
+        run('groupadd', '--system', 'music-player-ci')
+        fifo_group = grp.getgrnam('music-player-ci').gr_gid
+        os.mkfifo(fifo, 0o660)
+        os.chown(fifo, 0, fifo_group)
+        fifo.chmod(0o660)
         fd = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
 
         def drain():
@@ -103,12 +108,17 @@ def main():
                             'MUSIC_PLAYER_ATPROTO=false\nMUSIC_PLAYER_SCROBBLE=false\n'
                             'MUSIC_PLAYER_REMOTE_PLAYER=false\n')
         DROPIN.parent.mkdir(parents=True)
-        DROPIN.write_text(f'[Service]\nReadWritePaths={fifo}\n')
+        DROPIN.write_text('[Service]\nSupplementaryGroups=music-player-ci\n')
         run('systemctl', 'daemon-reload')
         run('systemctl', 'enable', '--now', UNIT)
         tracks = ready()
         pid = run('systemctl', 'show', '-p', 'MainPID', '--value', UNIT)
-        assert int(run('ps', '-o', 'uid=', '-p', pid)) != 0, 'service runs as root'
+        service_uid = pwd.getpwnam('music-player').pw_uid
+        assert service_uid != 0
+        assert int(run('ps', '-o', 'uid=', '-p', pid)) == service_uid
+        assert os.readlink(f'/proc/{pid}/ns/mnt') == os.readlink('/proc/1/ns/mnt'), 'unexpected mount isolation'
+        assert run('systemctl', 'show', '-p', 'DynamicUser', '--value', UNIT) == 'no'
+        report['shared_tmp_group_fifo'] = True
         graphql('mutation($track:TrackInput!) { addTrack(track:$track) { id } }', {'track': tracks[0]})
         graphql('mutation { play }')
         deadline = time.monotonic() + 20
@@ -160,6 +170,7 @@ def main():
         assert DEFAULTS.read_bytes() == defaults_before
         run('dpkg', '--purge', 'music-player-cli')
         assert settings.exists() and not DEFAULTS.exists()
+        assert pwd.getpwnam('music-player').pw_uid == service_uid, 'purge removed retained data owner'
         assert not os.path.lexists('/etc/systemd/system/multi-user.target.wants/' + UNIT)
         report['remove_stops_purge_retains_data'] = True
         print(json.dumps(report))

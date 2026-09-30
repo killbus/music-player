@@ -1,6 +1,23 @@
 #!/bin/sh
 set -eu
 if [ "$1" = configure ]; then
+    # Retain a stable identity while application data survives removal/purge.
+    if getent passwd music-player >/dev/null; then
+        account=$(getent passwd music-player)
+        account_uid=$(printf '%s' "$account" | cut -d: -f3)
+        account_home=$(printf '%s' "$account" | cut -d: -f6)
+        account_shell=$(printf '%s' "$account" | cut -d: -f7)
+        if [ "$account_uid" -eq 0 ] || [ "$account_home" != /var/lib/music-player ] ||
+           { [ "$account_shell" != /usr/sbin/nologin ] && [ "$account_shell" != /bin/false ]; }; then
+            echo 'Refusing to reuse an incompatible music-player account' >&2
+            exit 1
+        fi
+    else
+        adduser --system --group --home /var/lib/music-player --no-create-home --shell /usr/sbin/nologin music-player
+    fi
+    if ! getent group music-player >/dev/null; then
+        addgroup --system music-player
+    fi
     # Record unit links for purge without enabling the service.
     deb-systemd-helper update-state music-player.service
     if [ -d /run/systemd/system ]; then

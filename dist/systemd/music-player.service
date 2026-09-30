@@ -4,7 +4,10 @@ After=network.target
 
 [Service]
 Type=simple
-DynamicUser=yes
+User=music-player
+Group=music-player
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 StateDirectory=music-player music-player/music
 CacheDirectory=music-player
@@ -18,7 +21,8 @@ EnvironmentFile=-/etc/default/music-player
 ExecStart=/usr/bin/music-player
 Restart=on-failure
 RestartSec=5
-PrivateTmp=yes
+# Share the host temporary directory for Snapserver /tmp/snapfifo.
+PrivateTmp=no
 
 [Install]
 WantedBy=multi-user.target
