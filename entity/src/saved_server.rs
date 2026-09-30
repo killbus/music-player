@@ -27,6 +27,10 @@ pub struct Model {
     /// Stored as given. Never returned over the API — callers are told only
     /// whether one is set.
     pub password: Option<String>,
+    /// Authenticated remote identity, pinned as a pair on first successful bind.
+    /// Configuration edits never clear or replace it. NULL means not yet bound.
+    pub remote_server_id: Option<String>,
+    pub remote_user_id: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
 }

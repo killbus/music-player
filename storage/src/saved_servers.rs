@@ -3,6 +3,7 @@
 
 use anyhow::{bail, Error};
 use music_player_entity::saved_server;
+use music_player_types::source::RemoteIdentity;
 use sea_orm::{
     ActiveValue, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait,
     QueryFilter, QueryOrder, Set, Statement, TransactionTrait,
@@ -122,8 +123,66 @@ pub async fn get(db: &DatabaseConnection, id: &str) -> Result<Option<SavedServer
         .await?)
 }
 
+/// Pin an authenticated identity only while the saved authentication config matches.
+/// Pass the saved row read BEFORE authentication, not one refreshed afterwards.
+/// Name and updated_at are deliberately excluded: a name-only edit is allowed and
+/// the returned row includes that edit. Binding itself changes neither timestamp.
+/// This compares configuration values, not edit history (there is no revision).
+pub async fn bind_remote_identity(
+    db: &DatabaseConnection,
+    auth_start_snapshot: &SavedServer,
+    remote: &RemoteIdentity,
+) -> Result<SavedServer, Error> {
+    if remote.server_id.trim().is_empty() || remote.user_id.trim().is_empty() {
+        bail!("remote identity requires both server and user IDs");
+    }
+    match (
+        auth_start_snapshot.remote_server_id.as_deref(),
+        auth_start_snapshot.remote_user_id.as_deref(),
+    ) {
+        (None, None) => {}
+        (Some(server), Some(user)) if server == remote.server_id && user == remote.user_id => {}
+        _ => bail!("authentication snapshot has a different or incomplete remote identity"),
+    }
+
+    // One UPDATE checks both config and binding while holding SQLite's write lock.
+    // IS compares nullable values exactly: NULL and an explicit empty password
+    // are different. Partial bindings cannot be silently repaired or overwritten.
+    let statement = Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        "UPDATE saved_server SET remote_server_id = ?, remote_user_id = ?
+        WHERE id = ? AND kind = ? AND url = ?
+          AND username IS ? AND password IS ? AND created_at IS ?
+          AND ((remote_server_id IS NULL AND remote_user_id IS NULL)
+            OR (remote_server_id = ? AND remote_user_id = ?))
+        RETURNING *",
+        vec![
+            remote.server_id.clone().into(),
+            remote.user_id.clone().into(),
+            auth_start_snapshot.id.clone().into(),
+            auth_start_snapshot.kind.clone().into(),
+            auth_start_snapshot.url.clone().into(),
+            auth_start_snapshot.username.clone().into(),
+            auth_start_snapshot.password.clone().into(),
+            auth_start_snapshot.created_at.clone().into(),
+            remote.server_id.clone().into(),
+            remote.user_id.clone().into(),
+        ],
+    );
+    saved_server::Entity::find()
+        .from_raw_sql(statement)
+        .one(db)
+        .await
+        // Do not expose database diagnostics that may contain bound credentials.
+        .map_err(|_| Error::msg("remote identity binding database operation failed"))?
+        .ok_or_else(|| {
+            Error::msg("saved account changed, was removed, or has a different remote identity")
+        })
+}
+
 /// Save atomically by (kind, normalized URL, normalized username), or edit an ID.
 /// Saving does not reconnect a provider: active connections retain their snapshot.
+/// Neither edit path writes the remote identity pair; only binding may set it.
 pub async fn upsert(
     db: &DatabaseConnection,
     server: &NewServer,
@@ -143,6 +202,7 @@ pub async fn upsert(
             update => Set(update.value()),
         };
         // A tuple collision is an UPDATE error, never an upsert into another ID.
+        // Leave the remote identity NotSet, including if authentication just bound it.
         return Ok(saved_server::Entity::update(saved_server::ActiveModel {
             id: Set(id.clone()),
             name: Set(server.name.clone()),

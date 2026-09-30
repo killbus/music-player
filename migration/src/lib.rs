@@ -26,6 +26,7 @@ mod m20260913_000001_add_play_history;
 mod m20260913_000002_per_source_analytics;
 mod m20260923_000001_create_track_fingerprint;
 mod m20260930_000001_saved_accounts;
+mod m20260930_000002_source_identity;
 
 /// Create the database file if needed and bring the schema up to date,
 /// without going through the sea-orm migration CLI (which parses argv).
@@ -70,6 +71,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260913_000002_per_source_analytics::Migration),
             Box::new(m20260923_000001_create_track_fingerprint::Migration),
             Box::new(m20260930_000001_saved_accounts::Migration),
+            Box::new(m20260930_000002_source_identity::Migration),
         ]
     }
 }

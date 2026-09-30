@@ -71,8 +71,13 @@ async fn migration_retains_old_id_and_replaces_url_uniqueness() {
     let other = upsert(&db, &account("guest"), LATER).await.unwrap();
     assert_ne!(other.id, old_id);
     assert!(Uuid::parse_str(&other.id).is_ok());
-    // A downgrade cannot drop either account to restore the former index.
-    assert!(Migrator::down(&db, Some(1)).await.is_err());
+    // Reach saved_accounts even after later migrations have been added. A
+    // downgrade cannot drop either account to restore the former unique index.
+    let down_steps = (Migrator::migrations().len() - old_count) as u32;
+    assert!(Migrator::down(&db, Some(down_steps)).await.is_err());
+    // SQLite may already have removed the identity columns before that failure.
+    // Restore the current schema before querying it through the current entity.
+    Migrator::up(&db, None).await.unwrap();
     assert_eq!(list(&db).await.unwrap().len(), 2);
     assert!(delete(&db, &old_id).await.unwrap());
     assert!(get(&db, &old_id).await.unwrap().is_none());
@@ -336,4 +341,482 @@ fn legacy_json_failure_preserves_input_and_empty_password_remains_compatible() {
     let accounts = legacy_json_servers(Some(&path)).unwrap();
     assert_eq!(accounts[0].username.as_deref(), Some("family"));
     assert_eq!(accounts[0].password_update, PasswordUpdate::Keep);
+}
+
+fn identity(server: &str, user: &str) -> RemoteIdentity {
+    RemoteIdentity {
+        server_id: server.into(),
+        user_id: user.into(),
+    }
+}
+
+fn assert_identity(saved: &SavedServer, remote: &RemoteIdentity) {
+    assert_eq!(
+        saved.remote_server_id.as_deref(),
+        Some(remote.server_id.as_str())
+    );
+    assert_eq!(
+        saved.remote_user_id.as_deref(),
+        Some(remote.user_id.as_str())
+    );
+}
+
+const BIND_CONFLICT: &str =
+    "saved account changed, was removed, or has a different remote identity";
+
+#[tokio::test]
+async fn identity_migration_preserves_legacy_rows_and_nullable_credentials() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    let previous_count = Migrator::migrations()
+        .iter()
+        .position(|migration| migration.name() == "m20260930_000002_source_identity")
+        .unwrap();
+    Migrator::up(&db, Some(previous_count as u32))
+        .await
+        .unwrap();
+    let mut expected = Vec::new();
+    for (id, username, password) in [
+        ("legacy-null", None, None),
+        ("legacy-empty", Some("family"), Some("")),
+    ] {
+        db.execute_raw(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO saved_server(id,kind,name,url,username,password,created_at,updated_at)
+            VALUES (?, 'emby', 'Old name', 'http://fixture', ?, ?, NULL, ?)",
+            vec![
+                id.into(),
+                username.map(str::to_owned).into(),
+                password.map(str::to_owned).into(),
+                NOW.into(),
+            ],
+        ))
+        .await
+        .unwrap();
+        expected.push(SavedServer {
+            id: id.into(),
+            kind: "emby".into(),
+            name: "Old name".into(),
+            url: "http://fixture".into(),
+            username: username.map(str::to_owned),
+            password: password.map(str::to_owned),
+            updated_at: Some(NOW.into()),
+            ..Default::default()
+        });
+    }
+    Migrator::up(&db, None).await.unwrap();
+    for row in &expected {
+        assert_eq!(get(&db, &row.id).await.unwrap().as_ref(), Some(row));
+    }
+    let down_steps = (Migrator::migrations().len() - previous_count) as u32;
+    Migrator::down(&db, Some(down_steps)).await.unwrap();
+    let manager = migration::SchemaManager::new(&db);
+    assert!(!manager
+        .has_column("saved_server", "remote_server_id")
+        .await
+        .unwrap());
+    assert!(!manager
+        .has_column("saved_server", "remote_user_id")
+        .await
+        .unwrap());
+    // Re-upgrade also proves that downgrade left old IDs/config/timestamps intact.
+    Migrator::up(&db, None).await.unwrap();
+    for row in &expected {
+        assert_eq!(get(&db, &row.id).await.unwrap().as_ref(), Some(row));
+        // NULL created_at and nullable authentication fields must be matchable.
+        assert_identity(
+            &bind_remote_identity(&db, row, &identity("server", &row.id))
+                .await
+                .unwrap(),
+            &identity("server", &row.id),
+        );
+    }
+}
+
+#[tokio::test]
+async fn binding_is_idempotent_but_never_changes_either_remote_id() {
+    let db = db().await;
+    let snapshot = upsert(&db, &account("family"), NOW).await.unwrap();
+    let remote = identity("server-a", "user-a");
+    let bound = bind_remote_identity(&db, &snapshot, &remote).await.unwrap();
+    let mut expected = snapshot.clone();
+    expected.remote_server_id = Some(remote.server_id.clone());
+    expected.remote_user_id = Some(remote.user_id.clone());
+    assert_eq!(bound, expected);
+    // The original unbound auth snapshot and a freshly bound one both work.
+    for auth_snapshot in [&snapshot, &bound] {
+        assert_eq!(
+            bind_remote_identity(&db, auth_snapshot, &remote)
+                .await
+                .unwrap(),
+            bound
+        );
+        for other in [
+            identity("server-b", "user-a"),
+            identity("server-a", "user-b"),
+        ] {
+            assert!(bind_remote_identity(&db, auth_snapshot, &other)
+                .await
+                .is_err());
+        }
+    }
+    assert_eq!(get(&db, &snapshot.id).await.unwrap(), Some(bound));
+}
+
+#[tokio::test]
+async fn concurrent_remote_pairs_have_one_winner_and_same_pair_can_repeat() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("binding.db");
+    let mut options = sea_orm::ConnectOptions::new(format!("sqlite://{}?mode=rwc", path.display()));
+    // Separate single-connection pools exercise SQLite serialization, not one
+    // pool's queue. Every connection gets a finite busy timeout.
+    options
+        .max_connections(1)
+        .min_connections(1)
+        .sqlx_logging(false);
+    let db_a = Database::connect(options.clone()).await.unwrap();
+    Migrator::up(&db_a, None).await.unwrap();
+    let db_b = Database::connect(options).await.unwrap();
+    for connection in [&db_a, &db_b] {
+        connection
+            .execute_unprepared("PRAGMA journal_mode=WAL")
+            .await
+            .unwrap();
+        connection
+            .execute_unprepared("PRAGMA busy_timeout=5000")
+            .await
+            .unwrap();
+    }
+    let snapshot = upsert(&db_a, &account("family"), NOW).await.unwrap();
+    let a = identity("server-a", "user-a");
+    let b = identity("server-b", "user-b");
+    let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::join!(
+            bind_remote_identity(&db_a, &snapshot, &a),
+            bind_remote_identity(&db_b, &snapshot, &b),
+        )
+    })
+    .await
+    .unwrap();
+    let (winner, loser, remote) = match (first, second) {
+        (Ok(winner), Err(loser)) => (winner, loser, a),
+        (Err(loser), Ok(winner)) => (winner, loser, b),
+        _ => panic!("exactly one different remote pair must bind"),
+    };
+    // A lock/SQL error is not evidence of correctly resolving a binding race.
+    assert_eq!(loser.to_string(), BIND_CONFLICT);
+    assert_identity(&winner, &remote);
+    assert_eq!(
+        get(&db_a, &snapshot.id).await.unwrap(),
+        Some(winner.clone())
+    );
+    let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::join!(
+            bind_remote_identity(&db_a, &snapshot, &remote),
+            bind_remote_identity(&db_b, &snapshot, &remote),
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(first.unwrap(), winner);
+    assert_eq!(second.unwrap(), winner);
+    db_a.close().await.unwrap();
+    db_b.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn url_or_password_edit_during_authentication_rejects_old_snapshot() {
+    for change_url in [true, false] {
+        let db = db().await;
+        let snapshot = upsert(&db, &account("family"), NOW).await.unwrap();
+        let mut edit = account("family")
+            .with_id(Some(snapshot.id.clone()))
+            .with_password_update(PasswordUpdate::Keep);
+        if change_url {
+            edit.url = "http://moved".into();
+        } else {
+            edit.password_update = PasswordUpdate::Set("replacement-secret".into());
+        }
+        let edited = upsert(&db, &edit, LATER).await.unwrap();
+        let remote = identity("server", "user");
+        assert_eq!(
+            bind_remote_identity(&db, &snapshot, &remote)
+                .await
+                .unwrap_err()
+                .to_string(),
+            BIND_CONFLICT,
+        );
+        assert_eq!(get(&db, &snapshot.id).await.unwrap(), Some(edited.clone()));
+        assert_identity(
+            &bind_remote_identity(&db, &edited, &remote).await.unwrap(),
+            &remote,
+        );
+    }
+}
+
+#[tokio::test]
+async fn name_only_edit_is_allowed_and_binding_returns_current_metadata() {
+    let db = db().await;
+    let snapshot = upsert(&db, &account("family"), NOW).await.unwrap();
+    let mut edit = account("family")
+        .with_id(Some(snapshot.id.clone()))
+        .with_password_update(PasswordUpdate::Keep);
+    edit.name = "Renamed during authentication".into();
+    let mut expected = upsert(&db, &edit, LATER).await.unwrap();
+    let remote = identity("server", "user");
+    expected.remote_server_id = Some(remote.server_id.clone());
+    expected.remote_user_id = Some(remote.user_id.clone());
+    assert_eq!(
+        bind_remote_identity(&db, &snapshot, &remote).await.unwrap(),
+        expected
+    );
+    assert_eq!(expected.created_at.as_deref(), Some(NOW));
+    assert_eq!(expected.updated_at.as_deref(), Some(LATER));
+}
+
+#[tokio::test]
+async fn binding_distinguishes_null_and_empty_password_in_both_directions() {
+    for initially_empty in [true, false] {
+        let db = db().await;
+        let input = NewServer::new("emby", "Anonymous", "http://fixture").with_password_update(
+            if initially_empty {
+                PasswordUpdate::Set(String::new())
+            } else {
+                PasswordUpdate::Clear
+            },
+        );
+        let snapshot = upsert(&db, &input, NOW).await.unwrap();
+        assert_eq!(snapshot.password.as_deref(), initially_empty.then_some(""));
+        assert_eq!(snapshot.username, None);
+        let edit = input
+            .with_id(Some(snapshot.id.clone()))
+            .with_password_update(if initially_empty {
+                PasswordUpdate::Clear
+            } else {
+                PasswordUpdate::Set(String::new())
+            });
+        let edited = upsert(&db, &edit, LATER).await.unwrap();
+        assert_eq!(edited.password.as_deref(), (!initially_empty).then_some(""));
+        let remote = identity("server", "user");
+        assert_eq!(
+            bind_remote_identity(&db, &snapshot, &remote)
+                .await
+                .unwrap_err()
+                .to_string(),
+            BIND_CONFLICT
+        );
+        assert_eq!(get(&db, &snapshot.id).await.unwrap(), Some(edited.clone()));
+        assert_identity(
+            &bind_remote_identity(&db, &edited, &remote).await.unwrap(),
+            &remote,
+        );
+    }
+}
+
+#[tokio::test]
+async fn binding_checks_kind_username_and_creation_stamp_as_well() {
+    // Ordinary edits forbid changing kind/username; raw updates exercise legacy
+    // writers and nullable comparison without weakening that public API rule.
+    for sql in [
+        "UPDATE saved_server SET kind = 'emby' WHERE id = ?",
+        "UPDATE saved_server SET username = NULL WHERE id = ?",
+        "UPDATE saved_server SET username = '' WHERE id = ?",
+        "UPDATE saved_server SET created_at = NULL WHERE id = ?",
+        "UPDATE saved_server SET created_at = 'replacement' WHERE id = ?",
+    ] {
+        let db = db().await;
+        let snapshot = upsert(&db, &account("family"), NOW).await.unwrap();
+        db.execute_raw(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            sql,
+            [snapshot.id.clone().into()],
+        ))
+        .await
+        .unwrap();
+        let edited = get(&db, &snapshot.id).await.unwrap().unwrap();
+        let remote = identity("server", "user");
+        assert_eq!(
+            bind_remote_identity(&db, &snapshot, &remote)
+                .await
+                .unwrap_err()
+                .to_string(),
+            BIND_CONFLICT
+        );
+        assert_eq!(get(&db, &snapshot.id).await.unwrap(), Some(edited.clone()));
+        assert_identity(
+            &bind_remote_identity(&db, &edited, &remote).await.unwrap(),
+            &remote,
+        );
+    }
+    let db = db().await;
+    let snapshot = upsert(
+        &db,
+        &NewServer::new("emby", "Anonymous", "http://fixture"),
+        NOW,
+    )
+    .await
+    .unwrap();
+    db.execute_unprepared("UPDATE saved_server SET username = ''")
+        .await
+        .unwrap();
+    // COALESCE would incorrectly treat the old NULL username as still current.
+    assert_eq!(
+        bind_remote_identity(&db, &snapshot, &identity("s", "u"))
+            .await
+            .unwrap_err()
+            .to_string(),
+        BIND_CONFLICT
+    );
+}
+
+#[tokio::test]
+async fn ordinary_edits_and_tuple_upserts_preserve_a_pinned_remote_pair() {
+    let db = db().await;
+    let snapshot = upsert(&db, &account("family"), NOW).await.unwrap();
+    let remote = identity("server", "user");
+    let bound = bind_remote_identity(&db, &snapshot, &remote).await.unwrap();
+    let mut edit = account("family").with_id(Some(bound.id.clone()));
+    edit.url = "http://new-address".into();
+    edit.name = "New display name".into();
+    for explicit_id in [true, false] {
+        // Exercise both UPDATE by ID and INSERT ... ON CONFLICT.
+        edit.id = explicit_id.then(|| bound.id.clone());
+        for (update, password) in [
+            (PasswordUpdate::Keep, Some("password-family")),
+            (PasswordUpdate::Set(String::new()), Some("")),
+            (PasswordUpdate::Clear, None),
+            (
+                PasswordUpdate::Set("password-family".into()),
+                Some("password-family"),
+            ),
+        ] {
+            let saved = upsert(&db, &edit.clone().with_password_update(update), LATER)
+                .await
+                .unwrap();
+            assert_identity(&saved, &remote);
+            assert_eq!(saved.id, bound.id);
+            assert_eq!(saved.created_at, bound.created_at);
+            assert_eq!(saved.name, edit.name);
+            assert_eq!(saved.url, edit.url);
+            assert_eq!(saved.password.as_deref(), password);
+            // A previous binding never exempts authentication from the config check.
+            assert_eq!(
+                bind_remote_identity(&db, &bound, &remote)
+                    .await
+                    .unwrap_err()
+                    .to_string(),
+                BIND_CONFLICT
+            );
+            assert_eq!(
+                bind_remote_identity(&db, &saved, &remote).await.unwrap(),
+                saved
+            );
+            assert!(
+                bind_remote_identity(&db, &saved, &identity("other", "user"))
+                    .await
+                    .is_err()
+            );
+        }
+    }
+    assert_eq!(list(&db).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn deleted_account_authentication_cannot_bind_a_replacement_account() {
+    let db = db().await;
+    let snapshot = upsert(&db, &account("family"), NOW).await.unwrap();
+    let remote = identity("server", "user");
+    assert!(delete(&db, &snapshot.id).await.unwrap());
+    assert_eq!(
+        bind_remote_identity(&db, &snapshot, &remote)
+            .await
+            .unwrap_err()
+            .to_string(),
+        BIND_CONFLICT
+    );
+    let replacement = upsert(&db, &account("family"), NOW).await.unwrap();
+    assert_ne!(replacement.id, snapshot.id);
+    assert_eq!(
+        bind_remote_identity(&db, &snapshot, &remote)
+            .await
+            .unwrap_err()
+            .to_string(),
+        BIND_CONFLICT
+    );
+    assert_eq!(
+        get(&db, &replacement.id).await.unwrap(),
+        Some(replacement.clone())
+    );
+    assert_identity(
+        &bind_remote_identity(&db, &replacement, &remote)
+            .await
+            .unwrap(),
+        &remote,
+    );
+}
+
+#[tokio::test]
+async fn empty_or_partial_identities_are_rejected_without_overwriting_rows() {
+    let db = db().await;
+    let snapshot = upsert(&db, &account("family"), NOW).await.unwrap();
+    for remote in [
+        identity("", "user"),
+        identity("server", ""),
+        identity(" ", "user"),
+        identity("server", "　"),
+    ] {
+        assert!(bind_remote_identity(&db, &snapshot, &remote).await.is_err());
+        assert_eq!(
+            get(&db, &snapshot.id).await.unwrap(),
+            Some(snapshot.clone())
+        );
+    }
+    let remote = identity("server", "user");
+    for (server, user) in [(Some("server"), None), (None, Some("user"))] {
+        let mut partial = snapshot.clone();
+        partial.remote_server_id = server.map(str::to_owned);
+        partial.remote_user_id = user.map(str::to_owned);
+        assert!(bind_remote_identity(&db, &partial, &remote).await.is_err());
+        db.execute_raw(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "UPDATE saved_server SET remote_server_id = ?, remote_user_id = ? WHERE id = ?",
+            vec![
+                partial.remote_server_id.clone().into(),
+                partial.remote_user_id.clone().into(),
+                snapshot.id.clone().into(),
+            ],
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            bind_remote_identity(&db, &snapshot, &remote)
+                .await
+                .unwrap_err()
+                .to_string(),
+            BIND_CONFLICT
+        );
+        assert_eq!(get(&db, &snapshot.id).await.unwrap(), Some(partial));
+    }
+}
+
+#[tokio::test]
+async fn binding_database_errors_do_not_return_credential_diagnostics() {
+    let db = db().await;
+    let snapshot = upsert(&db, &account("family"), NOW).await.unwrap();
+    // A deliberately credential-bearing database error must not escape through
+    // anyhow's source chain or Debug, even if a backend embeds query parameters.
+    db.execute_unprepared(
+        "CREATE TRIGGER reject_binding BEFORE UPDATE ON saved_server
+        BEGIN SELECT RAISE(ABORT, 'password-family'); END",
+    )
+    .await
+    .unwrap();
+    let error = bind_remote_identity(&db, &snapshot, &identity("server", "user"))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "remote identity binding database operation failed"
+    );
+    assert!(!format!("{error:?}").contains("password-family"));
+    assert_eq!(get(&db, &snapshot.id).await.unwrap(), Some(snapshot));
 }
