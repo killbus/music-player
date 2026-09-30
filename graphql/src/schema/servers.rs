@@ -9,7 +9,7 @@
 use super::objects::server::{Server, ServerInput, SourceKind};
 use super::provider;
 use async_graphql::*;
-use music_player_provider::ProviderConfig;
+use music_player_provider::{ProviderConfig, ProviderError};
 use music_player_storage::{
     saved_servers::{self, NewServer, PasswordUpdate},
     Database,
@@ -148,11 +148,27 @@ impl ServersMutation {
             username: row.username.clone(),
             password: row.password.clone(),
         };
+        let snapshot = &row;
         let connected = provider::state(ctx)
-            .connect(config)
+            .connect_checked(config, |identity| async move {
+                match identity {
+                    Some(remote) => {
+                        saved_servers::bind_remote_identity(db.get_connection(), snapshot, &remote)
+                            .await
+                            .map_err(ProviderError::other)?;
+                        Ok(())
+                    }
+                    None if snapshot.kind == "emby" => Err(ProviderError::Other(
+                        "Emby did not confirm the remote account identity".into(),
+                    )),
+                    None => Ok(()),
+                }
+            })
             .await
             .map_err(provider::err)?;
-        provider::restamp_queue_likes(ctx, connected);
+        if connected.provider.capabilities().liked {
+            provider::restamp_queue_likes(ctx, connected);
+        }
 
         Ok(Server::from_row(row, Some(id.as_str())))
     }

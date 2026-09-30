@@ -15,6 +15,7 @@
 //! gRPC layer needs to route reads through a source, and it could not if a
 //! source needed the gRPC client.
 
+pub mod emby;
 pub mod jellyfin;
 pub mod kodi;
 pub mod music_player;

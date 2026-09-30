@@ -5,7 +5,9 @@
 //! nothing else. It cannot interrupt playback — a provider is where the
 //! *screens* read from, and nothing reachable from here touches the player.
 
-use music_player_provider::{ConnectedProvider, Page, ProviderConfig, ProviderState};
+use music_player_provider::{
+    ConnectedProvider, Page, ProviderConfig, ProviderError, ProviderState,
+};
 use music_player_storage::{
     saved_servers::{self, NewServer, PasswordUpdate, SavedServer},
     Database,
@@ -225,12 +227,29 @@ impl ServersService for Servers {
             username: row.username.clone(),
             password: row.password.clone(),
         };
+        let snapshot = &row;
+        let db = self.db.get_connection();
         let connected = self
             .providers
-            .connect(config)
+            .connect_checked(config, |identity| async move {
+                match identity {
+                    Some(remote) => {
+                        saved_servers::bind_remote_identity(db, snapshot, &remote)
+                            .await
+                            .map_err(ProviderError::other)?;
+                        Ok(())
+                    }
+                    None if snapshot.kind == "emby" => Err(ProviderError::Other(
+                        "Emby did not confirm the remote account identity".into(),
+                    )),
+                    None => Ok(()),
+                }
+            })
             .await
             .map_err(crate::library::provider_status)?;
-        restamp_queue_likes(connected, Arc::clone(&self.tracklist));
+        if connected.provider.capabilities().liked {
+            restamp_queue_likes(connected, Arc::clone(&self.tracklist));
+        }
 
         Ok(tonic::Response::new(ConnectServerResponse {
             server: Some(to_proto(row, Some(id.as_str()))),

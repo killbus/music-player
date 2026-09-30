@@ -17,6 +17,7 @@
 
 pub mod backends;
 pub mod config;
+pub mod emby_playback;
 pub mod http;
 pub mod registry;
 pub mod state;
@@ -148,6 +149,12 @@ impl std::error::Error for ProviderError {}
 pub trait MusicProvider: Send + Sync + 'static {
     /// The registry key — `"subsonic"`, `"jellyfin"`, `"kodi"`, …
     fn kind(&self) -> &'static str;
+
+    /// Actual identity returned by authentication, distinct from a local saved
+    /// account ID. The host must verify/bind it before publishing the source.
+    fn remote_identity(&self) -> Option<music_player_types::source::RemoteIdentity> {
+        None
+    }
 
     /// Absolute base url, scheme included, no trailing slash. Non-empty by
     /// construction: [`ProviderFactory::connect`] refuses an empty one, which is
