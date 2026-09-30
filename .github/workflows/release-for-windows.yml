@@ -82,6 +82,20 @@ jobs:
           $asset = "music-player_$env:RELEASE_VERSION`_x86_64-pc-windows-msvc.tar.gz"
           tar -czf $asset -C $binaryDir music-player.exe duckdb.dll
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $smokeDir = Join-Path $env:RUNNER_TEMP 'music-player-archive-smoke'
+          New-Item -ItemType Directory -Force $smokeDir | Out-Null
+          tar -xzf $asset -C $smokeDir
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $buildPath = $env:PATH
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notlike "$env:GITHUB_WORKSPACE*" }) -join ';'
+          Push-Location $smokeDir
+          try {
+            & ./music-player.exe --help
+            if ($LASTEXITCODE -ne 0) { throw 'Extracted CLI failed to start' }
+          } finally {
+            Pop-Location
+            $env:PATH = $buildPath
+          }
           $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $asset" | Set-Content -Encoding ascii "$asset.sha256"
 

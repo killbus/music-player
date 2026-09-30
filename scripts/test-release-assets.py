@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise publication gates without contacting GitHub."""
 import importlib.util
+import hashlib
 import os
 from pathlib import Path
 import tempfile
@@ -27,10 +28,10 @@ class PublicationTests(unittest.TestCase):
         self.environment.start()
         self.addCleanup(self.environment.stop)
 
-    def invoke(self, command, names=()):
+    def invoke(self, command, names=(), side_effect=None):
         with patch.object(assets.sys, "argv", ["assets", command, "*.tar.gz*"]), \
              patch.object(assets, "release", return_value={"assets": [{"name": n} for n in names]}) as lookup, \
-             patch.object(assets.subprocess, "run") as upload:
+             patch.object(assets.subprocess, "run", side_effect=side_effect) as upload:
             assets.main()
             return lookup, upload
 
@@ -68,8 +69,25 @@ class PublicationTests(unittest.TestCase):
     def test_preserves_existing_archive_and_its_checksum(self):
         for name in ("old.tar.gz", "old.tar.gz.sha256"):
             Path(name).touch()
-        _, upload = self.invoke("publish", ("old.tar.gz",))
+        _, upload = self.invoke("publish", ("old.tar.gz", "old.tar.gz.sha256"))
         upload.assert_not_called()
+
+    def test_recovers_checksum_from_preserved_remote_bytes(self):
+        Path("old.tar.gz").write_bytes(b"new local build")
+        Path("old.tar.gz.sha256").write_text("incorrect local checksum")
+        remote = b"original release bytes"
+        uploaded = []
+
+        def transfer(command, **kwargs):
+            self.assertTrue(kwargs["check"])
+            if command[2] == "download":
+                (Path(command[-1]) / "old.tar.gz").write_bytes(remote)
+            else:
+                self.assertNotIn("--clobber", command)
+                uploaded.append(Path(command[-1]).read_text())
+
+        self.invoke("publish", ("old.tar.gz",), transfer)
+        self.assertEqual(uploaded, [f"{hashlib.sha256(remote).hexdigest()}  old.tar.gz\n"])
 
     def test_rejects_orphan_checksum(self):
         Path("old.tar.gz").touch()
