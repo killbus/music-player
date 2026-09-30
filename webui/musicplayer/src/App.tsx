@@ -9,6 +9,7 @@ import GenreDetailPage from "./Components/Genres/GenreDetailWithData";
 import GenresPage from "./Components/Genres";
 import FolderPage from "./Containers/Folder";
 import LikedPage from "./Containers/Liked";
+import MediaPage from "./Containers/Media";
 import PlaylistPage from "./Containers/Playlist";
 import PlaylistsPage from "./Containers/Playlists";
 import RadioPage from "./Containers/Radio";
@@ -41,6 +42,7 @@ function App() {
           <Route path="/playlists" element={<PlaylistsPage />} />
           <Route path="/playlists/:id" element={<PlaylistPage />} />
           <Route path="/liked" element={<LikedPage />} />
+          <Route path="/media" element={<MediaPage />} />
           <Route path="/radio" element={<RadioPage />} />
           <Route path="/extensions" element={<ExtensionsPage />} />
           <Route path="/servers" element={<ServersPage />} />
