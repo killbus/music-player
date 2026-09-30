@@ -167,3 +167,176 @@ impl Drop for ObservedReader {
         self.session.0.state.lock().unwrap().reader_released = true;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Event {
+        Read,
+        Wake,
+        Revoke,
+        ReaderDropped { released: bool },
+    }
+    type Events = Arc<Mutex<Vec<Event>>>;
+
+    struct RecordingReader {
+        events: Events,
+        session: Arc<Mutex<Option<StreamSession>>>,
+        fail_read: bool,
+    }
+    impl Read for RecordingReader {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            self.events.lock().unwrap().push(Event::Read);
+            if self.fail_read {
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "fixture read error",
+                ))
+            } else {
+                Ok(0)
+            }
+        }
+    }
+    impl Drop for RecordingReader {
+        fn drop(&mut self) {
+            let released = self
+                .session
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .snapshot()
+                .reader_released;
+            self.events
+                .lock()
+                .unwrap()
+                .push(Event::ReaderDropped { released });
+        }
+    }
+
+    fn input(fail_read: bool) -> (StreamInput, Events) {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let session = Arc::new(Mutex::new(None));
+        let wake_events = events.clone();
+        let revoke_events = events.clone();
+        let input = StreamInput::new(
+            Box::new(RecordingReader {
+                events: events.clone(),
+                session: session.clone(),
+                fail_read,
+            }),
+            "mp3".into(),
+            Metadata::default(),
+            1,
+            move || wake_events.lock().unwrap().push(Event::Wake),
+            move || revoke_events.lock().unwrap().push(Event::Revoke),
+        );
+        *session.lock().unwrap() = Some(input.session.clone());
+        (input, events)
+    }
+
+    #[test]
+    fn normal_reader_drop_wakes_then_releases_without_revoking_output() {
+        // Cover both early reader disposal and normal EOF cleanup.
+        for read_to_eof in [false, true] {
+            let (mut input, events) = input(false);
+            let session = input.session.clone();
+            let mut expected = Vec::new();
+            if read_to_eof {
+                assert_eq!(input.reader.read(&mut [0; 1]).unwrap(), 0);
+                expected.push(Event::Read);
+            }
+            assert!(!session.snapshot().reader_released);
+            drop(input);
+            expected.extend([Event::Wake, Event::ReaderDropped { released: false }]);
+            assert_eq!(*events.lock().unwrap(), expected);
+            let snapshot = session.snapshot();
+            assert!(snapshot.reader_released);
+            assert!(!snapshot.cancel_requested);
+            assert_eq!(snapshot.phase, StreamPhase::Queued);
+            assert_eq!(
+                snapshot.read_end,
+                if read_to_eof {
+                    StreamReadEnd::Eof
+                } else {
+                    StreamReadEnd::Reading
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn cancellation_revokes_before_wake_and_prevents_reader_io() {
+        let (mut input, events) = input(false);
+        let session = input.session.clone();
+        session.set_phase(StreamPhase::Decoding);
+        session.cancel();
+        assert_eq!(*events.lock().unwrap(), [Event::Revoke, Event::Wake]);
+        assert!(session.is_cancelled());
+        assert_eq!(session.snapshot().phase, StreamPhase::Cancelled);
+        assert!(!session.snapshot().reader_released);
+        let error = input.reader.read(&mut [0; 1]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+        assert_eq!(session.snapshot().read_end, StreamReadEnd::Cancelled);
+        // No Read event: cancellation must not enter the underlying reader.
+        assert_eq!(*events.lock().unwrap(), [Event::Revoke, Event::Wake]);
+        session.set_phase(StreamPhase::Decoding);
+        session.decoder_ended(Some(0));
+        assert_eq!(session.snapshot().phase, StreamPhase::Cancelled);
+        drop(input);
+        assert!(session.snapshot().reader_released);
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                Event::Revoke,
+                Event::Wake,
+                Event::Wake,
+                Event::ReaderDropped { released: false },
+            ]
+        );
+    }
+
+    #[test]
+    fn cancellation_preserves_failed_and_end_unconfirmed_phases() {
+        for (code, expected) in [(1, StreamPhase::Failed), (0, StreamPhase::EndUnconfirmed)] {
+            let (mut input, _) = input(false);
+            let session = input.session.clone();
+            assert_eq!(input.reader.read(&mut [0; 1]).unwrap(), 0);
+            session.decoder_ended(Some(code));
+            assert_eq!(session.snapshot().phase, expected);
+            session.cancel();
+            assert!(session.is_cancelled());
+            assert_eq!(session.snapshot().phase, expected);
+            assert_eq!(
+                input.reader.read(&mut [0; 1]).unwrap_err().kind(),
+                io::ErrorKind::ConnectionAborted
+            );
+            // Late decoder/progress updates cannot replace a terminal outcome.
+            session.set_phase(StreamPhase::Decoding);
+            session.decoder_ended(Some(1 - code));
+            assert_eq!(session.snapshot().phase, expected);
+        }
+    }
+
+    #[test]
+    fn successful_decoder_status_cannot_override_read_failure() {
+        let (mut input, _) = input(true);
+        let session = input.session.clone();
+        assert_eq!(
+            input.reader.read(&mut [0; 1]).unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        assert_eq!(session.snapshot().read_end, StreamReadEnd::Failed);
+        session.decoder_ended(Some(0));
+        session.decoder_joined();
+        drop(input);
+        let snapshot = session.snapshot();
+        assert_eq!(snapshot.decoder_status, Some(0));
+        assert_eq!(snapshot.read_end, StreamReadEnd::Failed);
+        assert_eq!(snapshot.phase, StreamPhase::Failed);
+        assert!(snapshot.reader_released && snapshot.decoder_joined);
+        assert!(!snapshot.cancel_requested);
+    }
+}

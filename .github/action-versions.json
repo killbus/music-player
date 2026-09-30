@@ -48,5 +48,35 @@
     "readme": "https://github.com/actions/cache/blob/v6.1.0/README.md",
     "metadata": "https://github.com/actions/cache/blob/v6.1.0/action.yml",
     "runtime": "node24"
+  },
+  {
+    "repository": "https://github.com/actions/setup-node",
+    "tag": "v7.0.0",
+    "release": "https://github.com/actions/setup-node/releases/tag/v7.0.0",
+    "sha": "820762786026740c76f36085b0efc47a31fe5020",
+    "checked_at": "2026-09-30",
+    "readme": "https://github.com/actions/setup-node/blob/v7.0.0/README.md",
+    "metadata": "https://github.com/actions/setup-node/blob/v7.0.0/action.yml",
+    "runtime": "node24"
+  },
+  {
+    "repository": "https://github.com/taiki-e/install-action",
+    "tag": "v2.87.22",
+    "release": "https://github.com/taiki-e/install-action/releases/tag/v2.87.22",
+    "sha": "83ac0ad63c0167e6f06796fab0fce28db1bf3db0",
+    "checked_at": "2026-09-30",
+    "readme": "https://github.com/taiki-e/install-action/blob/v2.87.22/README.md",
+    "metadata": "https://github.com/taiki-e/install-action/blob/v2.87.22/action.yml",
+    "runtime": "composite"
+  },
+  {
+    "repository": "https://github.com/codecov/codecov-action",
+    "tag": "v7.1.1",
+    "release": "https://github.com/codecov/codecov-action/releases/tag/v7.1.1",
+    "sha": "303a32d7a59b442fa8d48b6a1cc6825c09c847a5",
+    "checked_at": "2026-09-30",
+    "readme": "https://github.com/codecov/codecov-action/blob/v7.1.1/README.md",
+    "metadata": "https://github.com/codecov/codecov-action/blob/v7.1.1/action.yml",
+    "runtime": "composite"
   }
 ]

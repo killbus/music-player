@@ -88,6 +88,11 @@ jobs:
             sha256sum "$PROBE_DIR/Cargo.lock" "$PROBE_DIR/src/main.rs" "$PROBE_DIR/run.py"
           } > "$PROBE_DIR/results/environment.txt"
           cargo +1.96.0 build --locked --manifest-path "$PROBE_DIR/Cargo.toml" 2>&1 | tee "$PROBE_DIR/results/build.log"
+      - name: Check output generation and reader lifecycle invariants
+        timeout-minutes: 2
+        run: |
+          cargo +1.96.0 test --locked --manifest-path "$PROBE_DIR/Cargo.toml" -p rockbox-playback --lib output_tests:: 2>&1 | tee "$PROBE_DIR/results/output-unit.log"
+          cargo +1.96.0 test --locked --manifest-path "$PROBE_DIR/Cargo.toml" -p rockbox-playback --lib managed::tests:: 2>&1 | tee "$PROBE_DIR/results/managed-unit.log"
       - name: Run FIFO backpressure and Drop experiment
         timeout-minutes: 1
         run: python3 "$PROBE_DIR/output.py" | tee -a "$GITHUB_STEP_SUMMARY"

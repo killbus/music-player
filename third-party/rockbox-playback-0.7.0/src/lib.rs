@@ -4109,3 +4109,6 @@ mod level_meter_tests {
         assert!(levels.left <= 1.0 && levels.low_left <= 1.0, "{levels:?}");
     }
 }
+
+#[cfg(test)]
+mod output_tests;
