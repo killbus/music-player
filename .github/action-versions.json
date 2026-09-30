@@ -4,7 +4,7 @@
     "tag": "v7.0.1",
     "release": "https://github.com/actions/checkout/releases/tag/v7.0.1",
     "sha": "3d3c42e5aac5ba805825da76410c181273ba90b1",
-    "checked_at": "2026-09-29",
+    "checked_at": "2026-09-30",
     "readme": "https://github.com/actions/checkout/blob/v7.0.1/README.md",
     "metadata": "https://github.com/actions/checkout/blob/v7.0.1/action.yml",
     "runtime": "node24"
@@ -14,7 +14,7 @@
     "tag": "v7.0.1",
     "release": "https://github.com/actions/upload-artifact/releases/tag/v7.0.1",
     "sha": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
-    "checked_at": "2026-09-29",
+    "checked_at": "2026-09-30",
     "readme": "https://github.com/actions/upload-artifact/blob/v7.0.1/README.md",
     "metadata": "https://github.com/actions/upload-artifact/blob/v7.0.1/action.yml",
     "runtime": "node24"
