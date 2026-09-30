@@ -1,4 +1,4 @@
-use music_player_provider::{Page, ProviderError, ProviderState};
+use music_player_provider::{ConnectedProvider, Page, ProviderError, ProviderState};
 use music_player_storage::repo::album::AlbumRepository;
 use music_player_storage::repo::artist::ArtistRepository;
 use music_player_storage::repo::track::TrackRepository;
@@ -11,11 +11,14 @@ use crate::api::metadata::v1alpha1::{
     Album as AlbumMetadata, Artist as ArtistMetadata, Track as TrackMetadata,
 };
 use crate::api::music::v1alpha1::{
-    library_service_server::LibraryService, GetAlbumDetailsRequest, GetAlbumDetailsResponse,
-    GetAlbumsRequest, GetAlbumsResponse, GetArtistDetailsRequest, GetArtistDetailsResponse,
-    GetArtistsRequest, GetArtistsResponse, GetLikedTracksRequest, GetLikedTracksResponse,
-    GetTrackDetailsRequest, GetTrackDetailsResponse, GetTracksRequest, GetTracksResponse,
-    LikeTrackRequest, LikeTrackResponse, ScanRequest, ScanResponse, SearchRequest, SearchResponse,
+    library_service_server::LibraryService, BrowseMediaRequest, BrowseMediaResponse,
+    GetAlbumDetailsRequest, GetAlbumDetailsResponse, GetAlbumsRequest, GetAlbumsResponse,
+    GetArtistDetailsRequest, GetArtistDetailsResponse, GetArtistsRequest, GetArtistsResponse,
+    GetLikedTracksRequest, GetLikedTracksResponse, GetMediaBrowserRequest, GetMediaBrowserResponse,
+    GetMediaContainerTracksRequest, GetMediaContainerTracksResponse, GetTrackDetailsRequest,
+    GetTrackDetailsResponse, GetTracksRequest, GetTracksResponse, LikeTrackRequest,
+    LikeTrackResponse, MediaBrowser, MediaEntry, ScanRequest, ScanResponse, SearchRequest,
+    SearchResponse,
 };
 
 pub struct Library {
@@ -34,6 +37,25 @@ pub struct Library {
 }
 
 impl Library {
+    // Keep the same provider across awaits and label every result with its
+    // account. A client can discard a reply to a superseded navigation.
+    async fn media_provider(&self, server_id: &str) -> Result<ConnectedProvider, tonic::Status> {
+        let current = self.providers.current().await.ok_or_else(|| {
+            tonic::Status::failed_precondition("Connect a media server to browse its libraries")
+        })?;
+        if current.config.id != server_id {
+            return Err(tonic::Status::failed_precondition(
+                "The browsing server changed; refresh its libraries",
+            ));
+        }
+        if !current.provider.capabilities().media_browse {
+            return Err(tonic::Status::failed_precondition(
+                "This server does not support media library navigation",
+            ));
+        }
+        Ok(current)
+    }
+
     pub fn new(
         db: Database,
         providers: Arc<ProviderState>,
@@ -60,6 +82,95 @@ pub(crate) fn provider_status(e: ProviderError) -> tonic::Status {
 
 #[tonic::async_trait]
 impl LibraryService for Library {
+    async fn get_media_browser(
+        &self,
+        _: tonic::Request<GetMediaBrowserRequest>,
+    ) -> Result<tonic::Response<GetMediaBrowserResponse>, tonic::Status> {
+        let browser = self.providers.current().await.map(|current| MediaBrowser {
+            server_id: current.config.id,
+            supported: current.provider.capabilities().media_browse,
+        });
+        Ok(tonic::Response::new(GetMediaBrowserResponse { browser }))
+    }
+
+    async fn browse_media(
+        &self,
+        request: tonic::Request<BrowseMediaRequest>,
+    ) -> Result<tonic::Response<BrowseMediaResponse>, tonic::Status> {
+        let request = request.into_inner();
+        let limit = request.limit.unwrap_or(100);
+        if request.offset < 0 || !(1..=500).contains(&limit) {
+            return Err(tonic::Status::invalid_argument(
+                "Media pages need a nonnegative offset and a limit from 1 to 500",
+            ));
+        }
+        let next = request
+            .offset
+            .checked_add(limit)
+            .ok_or_else(|| tonic::Status::invalid_argument("Media page offset is too large"))?;
+        let current = self.media_provider(&request.server_id).await?;
+        let mut entries = current
+            .provider
+            .browse(
+                request.parent.as_deref(),
+                Page::new(request.offset, limit + 1),
+            )
+            .await
+            .map_err(provider_status)?;
+        let next_offset = (entries.len() > limit as usize).then_some(next);
+        entries.truncate(limit as usize);
+        let entries = entries
+            .into_iter()
+            .map(|entry| MediaEntry {
+                id: entry.id,
+                title: entry.title,
+                item_type: entry.item_type,
+                media_type: entry.media_type,
+                is_container: entry.is_container,
+                season_number: entry.season_number,
+                episode_number: entry.episode_number,
+                track: entry.track.map(|track| {
+                    music_player_provider::url::decorate(track, &current.config).into()
+                }),
+            })
+            .collect();
+        Ok(tonic::Response::new(BrowseMediaResponse {
+            server_id: current.config.id,
+            entries,
+            next_offset,
+        }))
+    }
+
+    async fn get_media_container_tracks(
+        &self,
+        request: tonic::Request<GetMediaContainerTracksRequest>,
+    ) -> Result<tonic::Response<GetMediaContainerTracksResponse>, tonic::Status> {
+        let request = request.into_inner();
+        if request.offset < 0 || request.parent.is_empty() {
+            return Err(tonic::Status::invalid_argument(
+                "A container and nonnegative offset are required",
+            ));
+        }
+        let current = self.media_provider(&request.server_id).await?;
+        let tracks = current
+            .provider
+            .container_tracks(
+                &request.parent,
+                Page::new(request.offset, request.limit.unwrap_or(100)),
+            )
+            .await
+            .map_err(provider_status)?;
+        let tracks = music_player_provider::url::decorate_all(tracks, &current.config)
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        // Read-only expansion: queue changes belong to the explicit AddTracks RPC.
+        Ok(tonic::Response::new(GetMediaContainerTracksResponse {
+            server_id: current.config.id,
+            tracks,
+        }))
+    }
+
     async fn scan(
         &self,
         _request: tonic::Request<ScanRequest>,

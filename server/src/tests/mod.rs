@@ -11,6 +11,7 @@ use music_player_tracklist::Tracklist;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 pub mod library;
+mod media;
 pub mod playback;
 pub mod server;
 pub mod tracklist;
