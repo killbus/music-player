@@ -1,12 +1,19 @@
 use std::{collections::HashSet, sync::Arc};
 
+use crate::api::music::v1alpha1::{
+    AddSelectedMediaRequest, AddSelectedMediaResponse, GetMediaQueueRequest, GetMediaQueueResponse,
+    MediaQueueAcceptedAudio, MediaQueueChoice, MediaQueueOccurrence, SelectMediaAudioRequest,
+    SelectMediaAudioResponse,
+};
 use music_player_entity::{album, artist, track};
 use music_player_playback::{
     player::{normalize_queue, PlayerCommand},
     source_resolver::SourceResolver,
 };
 use music_player_storage::Database;
+use music_player_tracklist::QueueEntry;
 use music_player_tracklist::Tracklist as TracklistState;
+use music_player_types::audio::AudioSelection;
 use music_player_types::source::SourceRef;
 use sea_orm::EntityTrait;
 use tokio::sync::mpsc::UnboundedSender;
@@ -80,6 +87,81 @@ impl Tracklist {
 
 #[tonic::async_trait]
 impl TracklistService for Tracklist {
+    async fn add_selected_media(
+        &self,
+        request: tonic::Request<AddSelectedMediaRequest>,
+    ) -> Result<tonic::Response<AddSelectedMediaResponse>, tonic::Status> {
+        let mut tracks = Vec::new();
+        let mut choices = Vec::new();
+        for entry in request.into_inner().entries {
+            tracks.push(
+                entry
+                    .track
+                    .ok_or_else(|| tonic::Status::invalid_argument("Track is required"))?
+                    .into(),
+            );
+            choices.push(requested_choice(entry.choice)?);
+        }
+        self.validate_queue(&mut tracks).await?;
+        for (track, selection) in tracks.iter().zip(&choices) {
+            let mut entry = QueueEntry::new(track.clone());
+            entry.selection = selection.clone();
+            entry.validate().map_err(tonic::Status::invalid_argument)?;
+        }
+        if tracks.is_empty() {
+            return Ok(tonic::Response::new(AddSelectedMediaResponse {
+                occurrence_ids: vec![],
+            }));
+        }
+        let (reply, received) = tokio::sync::oneshot::channel();
+        self.cmd_tx
+            .lock()
+            .unwrap()
+            .send(PlayerCommand::LoadSelectedTracks {
+                tracks: tracks.into_iter().zip(choices).collect(),
+                start_index: None,
+                reply,
+            })
+            .map_err(|_| tonic::Status::unavailable("Player command channel closed"))?;
+        let occurrence_ids = selection_reply(received).await?;
+        Ok(tonic::Response::new(AddSelectedMediaResponse {
+            occurrence_ids,
+        }))
+    }
+
+    async fn select_media_audio(
+        &self,
+        request: tonic::Request<SelectMediaAudioRequest>,
+    ) -> Result<tonic::Response<SelectMediaAudioResponse>, tonic::Status> {
+        let request = request.into_inner();
+        let selection = requested_choice(request.choice)?;
+        let (reply, received) = tokio::sync::oneshot::channel();
+        self.cmd_tx
+            .lock()
+            .unwrap()
+            .send(PlayerCommand::SelectAudio {
+                occurrence_id: request.occurrence_id,
+                selection,
+                reply,
+            })
+            .map_err(|_| tonic::Status::unavailable("Player command channel closed"))?;
+        selection_reply(received).await?;
+        Ok(tonic::Response::new(SelectMediaAudioResponse {}))
+    }
+
+    async fn get_media_queue(
+        &self,
+        _: tonic::Request<GetMediaQueueRequest>,
+    ) -> Result<tonic::Response<GetMediaQueueResponse>, tonic::Status> {
+        let queue = self.state.lock().unwrap();
+        let (played, upcoming) = queue.entries();
+        Ok(tonic::Response::new(GetMediaQueueResponse {
+            current: queue.current_entry().map(queue_occurrence),
+            played: played.into_iter().map(queue_occurrence).collect(),
+            upcoming: upcoming.into_iter().map(queue_occurrence).collect(),
+        }))
+    }
+
     async fn add_track(
         &self,
         request: tonic::Request<AddTrackRequest>,
@@ -365,3 +447,62 @@ impl TracklistService for Tracklist {
 #[cfg(test)]
 #[path = "tracklist/source_tests.rs"]
 mod source_tests;
+
+fn requested_choice(choice: Option<MediaQueueChoice>) -> Result<AudioSelection, tonic::Status> {
+    let choice = choice.unwrap_or_default();
+    match (choice.media_source_id, choice.audio_stream_index) {
+        (None, None) => Ok(AudioSelection::Auto),
+        (Some(id), Some(index)) if !id.trim().is_empty() && index >= 0 => {
+            Ok(AudioSelection::Explicit {
+                media_source_id: id,
+                audio_stream_index: index,
+            })
+        }
+        _ => Err(tonic::Status::invalid_argument(
+            "An audio choice needs both a media version and a nonnegative stream index",
+        )),
+    }
+}
+
+async fn selection_reply<T>(
+    reply: tokio::sync::oneshot::Receiver<Result<T, String>>,
+) -> Result<T, tonic::Status> {
+    tokio::time::timeout(std::time::Duration::from_secs(5), reply).await
+        .map_err(|_| tonic::Status::deadline_exceeded(
+            "Player acknowledgement timed out; outcome uncertain. The delayed command may still apply. A refresh showing no change does not prove failure. Do not retry this mutation.",
+        ))?
+        .map_err(|_| tonic::Status::unavailable(
+            "Player acknowledgement channel closed; outcome uncertain. The command may have applied. A refresh showing no change does not prove failure. Do not retry this mutation.",
+        ))?
+        .map_err(tonic::Status::failed_precondition)
+}
+
+fn queue_occurrence(entry: QueueEntry) -> MediaQueueOccurrence {
+    let (media_source_id, audio_stream_index) = match entry.selection {
+        AudioSelection::Explicit {
+            media_source_id,
+            audio_stream_index,
+        } => (Some(media_source_id), Some(audio_stream_index)),
+        _ => (None, None),
+    };
+    MediaQueueOccurrence {
+        occurrence_id: entry.occurrence_id,
+        track: Some(entry.track.into()),
+        choice: Some(MediaQueueChoice {
+            media_source_id,
+            audio_stream_index,
+        }),
+        accepted_audio: entry.pin.map(|pin| MediaQueueAcceptedAudio {
+            media_source_id: pin.media_source_id,
+            audio_stream_index: pin.audio_stream_index,
+            runtime_ticks: pin.runtime_ticks,
+            codec: pin.codec,
+            channels: pin.channels,
+            sample_rate: pin.sample_rate,
+        }),
+    }
+}
+
+#[cfg(test)]
+#[path = "tracklist/selection_tests.rs"]
+mod selection_tests;

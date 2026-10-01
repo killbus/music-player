@@ -2,35 +2,13 @@
 //! The host commits `pin` only after accepting the resolve ticket.
 
 use crate::{backends::emby::Emby, ProviderError};
+use music_player_types::audio::{AudioOptions, AudioStreamOption, AudioVersionOption};
+pub use music_player_types::audio::{AudioPin, AudioSelection};
 use music_player_types::source::{ResourceKind, SourceRef};
 use reqwest::{header::HeaderMap, Method};
 use serde::Deserialize;
 use std::sync::Arc;
 use url::Url;
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, Deserialize)]
-pub enum AudioSelection {
-    #[default]
-    Auto,
-    Explicit {
-        media_source_id: String,
-        audio_stream_index: i32,
-    },
-    Pinned(AudioPin),
-}
-
-/// Stable selection for one queue occurrence. The descriptor detects known
-/// metadata changes; it is NOT proof that the underlying media bytes are equal.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, Deserialize)]
-pub struct AudioPin {
-    pub media_source_id: String,
-    pub audio_stream_index: i32,
-    pub runtime_ticks: Option<u64>,
-    pub etag: Option<String>,
-    pub codec: Option<String>,
-    pub channels: Option<u32>,
-    pub sample_rate: Option<u32>,
-}
 
 pub struct ResolvedAudio {
     pub url: Url,
@@ -101,6 +79,26 @@ async fn cleanup(client: &Emby, session: &str) -> Result<(), ProviderError> {
 }
 
 impl Emby {
+    /// Read candidates without creating a playback session. Candidates describe
+    /// this metadata snapshot; resolution checks the selected identities again.
+    pub async fn audio_options(&self, source: &SourceRef) -> Result<AudioOptions, ProviderError> {
+        self.check_reference(&source.to_handle(), ResourceKind::Item)?;
+        let item = self.item(source).await?;
+        if !item.is_media_leaf() {
+            return Err(failure(
+                "Emby audio options require an Audio or Video leaf item",
+            ));
+        }
+        Ok(AudioOptions {
+            source: source.to_handle(),
+            versions: item
+                .media_sources
+                .iter()
+                .map(|version| version.options(&item.media_sources))
+                .collect(),
+        })
+    }
+
     pub async fn resolve_audio(
         self: &Arc<Self>,
         source: &SourceRef,
@@ -204,15 +202,7 @@ fn select(sources: &[MediaSource], selection: &AudioSelection) -> Result<AudioPi
             }),
     }
     .ok_or_else(|| failure("the selected Emby media source is unavailable"))?;
-    if source.id.is_empty() || sources.iter().filter(|other| other.id == source.id).count() != 1 {
-        return Err(failure("Emby media source identity is ambiguous"));
-    }
-    if source.requires_opening || source.requires_closing || source.is_infinite_stream {
-        return Err(ProviderError::Unsupported {
-            kind: "emby",
-            feature: "live or open/close playback sessions",
-        });
-    }
+    source.check_source(sources)?;
     let index = wanted
         .map(|(_, index)| index)
         .or(source.default_audio_stream_index);
@@ -229,15 +219,7 @@ fn select(sources: &[MediaSource], selection: &AudioSelection) -> Result<AudioPi
             .or_else(|| source.media_streams.iter().find(|stream| stream.is_audio()))
     }
     .ok_or_else(|| failure("the selected Emby audio stream is unavailable"))?;
-    if source
-        .media_streams
-        .iter()
-        .filter(|stream| stream.is_audio() && stream.index == audio.index)
-        .count()
-        != 1
-    {
-        return Err(failure("Emby audio stream identity is ambiguous"));
-    }
+    source.check_stream(audio)?;
     let pin = AudioPin {
         media_source_id: source.id.clone(),
         audio_stream_index: audio.index,
@@ -270,8 +252,10 @@ struct PlaybackInfo {
 }
 #[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "PascalCase")]
-struct MediaSource {
+pub(crate) struct MediaSource {
+    // Required in JSON: missing/null identity must not become a selectable ID.
     id: String,
+    name: Option<String>,
     #[serde(default)]
     media_streams: Vec<MediaStream>,
     default_audio_stream_index: Option<i32>,
@@ -288,9 +272,13 @@ struct MediaSource {
 #[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct MediaStream {
+    // Required in JSON: absent Index must never silently mean audio index zero.
     index: i32,
     #[serde(rename = "Type")]
     stream_type: String,
+    title: Option<String>,
+    display_title: Option<String>,
+    language: Option<String>,
     codec: Option<String>,
     channels: Option<u32>,
     sample_rate: Option<u32>,
@@ -300,6 +288,80 @@ struct MediaStream {
 impl MediaStream {
     fn is_audio(&self) -> bool {
         self.index >= 0 && self.stream_type == "Audio"
+    }
+}
+
+impl MediaSource {
+    // These checks serve both the candidate UI and the final resolver.
+    fn check_source(&self, sources: &[Self]) -> Result<(), ProviderError> {
+        if self.id.trim().is_empty()
+            || sources.iter().filter(|other| other.id == self.id).count() != 1
+        {
+            return Err(failure(
+                "Emby media source identity is missing or ambiguous",
+            ));
+        }
+        if self.requires_opening || self.requires_closing || self.is_infinite_stream {
+            return Err(ProviderError::Unsupported {
+                kind: "emby",
+                feature: "live or open/close playback sessions",
+            });
+        }
+        Ok(())
+    }
+
+    fn check_stream(&self, audio: &MediaStream) -> Result<(), ProviderError> {
+        if !audio.is_audio() {
+            return Err(failure("Emby audio stream index is invalid"));
+        }
+        if self
+            .media_streams
+            .iter()
+            .filter(|stream| stream.stream_type == "Audio" && stream.index == audio.index)
+            .count()
+            != 1
+        {
+            return Err(failure("Emby audio stream identity is ambiguous"));
+        }
+        Ok(())
+    }
+
+    fn options(&self, sources: &[Self]) -> AudioVersionOption {
+        let mut unavailable_reason = self.check_source(sources).err().map(|e| e.to_string());
+        let audio_streams: Vec<_> = self
+            .media_streams
+            .iter()
+            // Invalid audio indices remain visible but disabled, never renumbered.
+            .filter(|stream| stream.stream_type == "Audio")
+            .map(|stream| AudioStreamOption {
+                index: stream.index,
+                title: stream.title.clone(),
+                display_title: stream.display_title.clone(),
+                language: stream.language.clone(),
+                codec: stream.codec.clone(),
+                channels: stream.channels,
+                sample_rate: stream.sample_rate,
+                is_default: stream.is_default,
+                unavailable_reason: unavailable_reason
+                    .clone()
+                    .or_else(|| self.check_stream(stream).err().map(|e| e.to_string())),
+            })
+            .collect();
+        if unavailable_reason.is_none()
+            && !audio_streams
+                .iter()
+                .any(|stream| stream.unavailable_reason.is_none())
+        {
+            unavailable_reason = Some("Emby media source has no selectable audio streams".into());
+        }
+        AudioVersionOption {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            runtime_ticks: self.run_time_ticks,
+            default_audio_stream_index: self.default_audio_stream_index,
+            unavailable_reason,
+            audio_streams,
+        }
     }
 }
 
@@ -399,5 +461,53 @@ mod tests {
             }
         )
         .is_err());
+    }
+
+    #[test]
+    fn candidate_availability_agrees_with_explicit_resolution() {
+        let sources: Vec<MediaSource> = serde_json::from_value(serde_json::json!([
+            {"Id":"mixed","DefaultAudioStreamIndex":9,"MediaStreams":[
+                {"Type":"Video","Index":0}, {"Type":"Audio","Index":0},
+                {"Type":"Audio","Index":-1},
+                {"Type":"Audio","Index":2}, {"Type":"Audio","Index":2}
+            ]},
+            {"Id":"live","IsInfiniteStream":true,"MediaStreams":[{"Type":"Audio","Index":0}]},
+            {"Id":"open","RequiresOpening":true,"MediaStreams":[{"Type":"Audio","Index":0}]},
+            {"Id":"close","RequiresClosing":true,"MediaStreams":[{"Type":"Audio","Index":0}]},
+            {"Id":"duplicate","MediaStreams":[{"Type":"Audio","Index":0}]},
+            {"Id":"duplicate","MediaStreams":[{"Type":"Audio","Index":1}]},
+            {"Id":"","MediaStreams":[{"Type":"Audio","Index":0}]},
+            {"Id":" \t","MediaStreams":[{"Type":"Audio","Index":0}]},
+            {"Id":"empty","MediaStreams":[]},
+            {"Id":"invalid-only","MediaStreams":[{"Type":"Audio","Index":-1}]}
+        ]))
+        .unwrap();
+        let mut selectable = 0;
+        for source in &sources {
+            let option = source.options(&sources);
+            for stream in &option.audio_streams {
+                let advertised =
+                    option.unavailable_reason.is_none() && stream.unavailable_reason.is_none();
+                let result = select(
+                    &sources,
+                    &AudioSelection::Explicit {
+                        media_source_id: option.id.clone(),
+                        audio_stream_index: stream.index,
+                    },
+                );
+                assert_eq!(advertised, result.is_ok());
+                selectable += usize::from(advertised);
+            }
+            if option.audio_streams.is_empty() {
+                assert!(option.unavailable_reason.is_some());
+            }
+        }
+        assert_eq!(selectable, 1);
+        // An invalid advertised default is preserved, not silently replaced;
+        // an explicit valid index remains selectable independently of it.
+        assert_eq!(
+            sources[0].options(&sources).default_audio_stream_index,
+            Some(9)
+        );
     }
 }

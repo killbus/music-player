@@ -7,7 +7,7 @@ import {
 import { usePlayback } from "../../Hooks/usePlayback";
 import { usePlayTrack } from "../../Hooks/usePlayTrack";
 import {
-  browserKey, fetchContainerTracks, isSourceMutation, type MediaBrowserResult,
+  addSelectedMedia, browserKey, fetchContainerTracks, isSourceMutation, type AudioChoice, type MediaBrowserResult, type MediaTrack,
 } from "./api";
 
 export const errorMessage = (error: unknown) =>
@@ -126,5 +126,37 @@ export function useMediaQueue(serverId: string) {
     }
   };
 
-  return { phase, message, error, cancel, queueContainer, leaf };
+  const selected = async (track: MediaTrack, choice: AudioChoice) => {
+    const controller = begin("submitting");
+    let timedOut = false;
+    let rejectAborted!: () => void;
+    const aborted = new Promise<never>((_, reject) => {
+      rejectAborted = () => reject(new Error("Queue request cancelled"));
+    });
+    controller.signal.addEventListener("abort", rejectAborted, { once: true });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, 15000);
+    try {
+      if (!sourceIsCurrent()) throw new Error("The browsing server changed; refresh its libraries");
+      sent.current = true;
+      await Promise.race([addSelectedMedia(track, choice, controller.signal), aborted]);
+      if (!owns(controller)) return;
+      void client.invalidateQueries({ queryKey: ["GetTracklist"] });
+      void client.invalidateQueries({ queryKey: ["MediaQueue"] });
+      if (owns(controller)) setMessage("Added to the queue with the selected audio.");
+    } catch (cause) {
+      // A deadline abort retains ownership; source changes/cancel/unmount revoke it.
+      if (operation.current === controller) setError(timedOut
+        ? "The queue update timed out; outcome uncertain. The delayed command may still apply. A refresh showing no change does not prove failure. Do not retry this mutation."
+        : errorMessage(cause));
+    } finally {
+      clearTimeout(timer);
+      controller.signal.removeEventListener("abort", rejectAborted);
+      if (operation.current === controller) { operation.current = null; setPhase("idle"); }
+    }
+  };
+
+  return { phase, message, error, cancel, queueContainer, leaf, selected };
 }

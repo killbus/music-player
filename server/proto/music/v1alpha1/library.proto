@@ -124,7 +124,38 @@ message GetMediaContainerTracksResponse {
   repeated metadata.v1alpha1.Track tracks = 2;
 }
 
+// Candidate metadata only: showing choices does not start a playback session.
+message GetMediaAudioOptionsRequest {
+  // Stable source handle, including the saved account; never a bare item id.
+  string source = 1;
+}
+message AudioStreamOption {
+  int32 index = 1;
+  optional string title = 2;
+  optional string display_title = 3;
+  optional string language = 4;
+  optional string codec = 5;
+  optional uint32 channels = 6;
+  optional uint32 sample_rate = 7;
+  bool is_default = 8;
+  optional string unavailable_reason = 9;
+}
+message AudioVersionOption {
+  string id = 1;
+  optional string name = 2;
+  optional uint64 runtime_ticks = 3;
+  optional int32 default_audio_stream_index = 4;
+  optional string unavailable_reason = 5;
+  repeated AudioStreamOption audio_streams = 6;
+}
+message GetMediaAudioOptionsResponse {
+  string source = 1;
+  repeated AudioVersionOption versions = 2;
+}
+
 service LibraryService {
+  rpc GetMediaAudioOptions(GetMediaAudioOptionsRequest)
+      returns (GetMediaAudioOptionsResponse) {}
   rpc GetMediaBrowser(GetMediaBrowserRequest) returns (GetMediaBrowserResponse) {}
   rpc BrowseMedia(BrowseMediaRequest) returns (BrowseMediaResponse) {}
   rpc GetMediaContainerTracks(GetMediaContainerTracksRequest)

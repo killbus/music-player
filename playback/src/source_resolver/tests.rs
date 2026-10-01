@@ -226,6 +226,65 @@ fn episode() -> Value {
         "MediaType":"Video", "IsFolder":false, "RunTimeTicks":100_000_000_000_u64})
 }
 
+#[tokio::test]
+async fn audio_candidates_use_handle_account_and_do_not_create_a_playback_session() {
+    bounded(async {
+        let db = database().await;
+        let first = Fixture::new().await;
+        let second = Fixture::new().await;
+        let account = save(&db, &first.url(), "family", true).await;
+        let _other = save(&db, &second.url(), "other-family", true).await;
+        let source = source(&account);
+        let resolver = resolver(&db);
+        let mut metadata = episode();
+        metadata["MediaSources"] = json!([{
+            "Id":"version-a", "RunTimeTicks":191429666670_u64, "DefaultAudioStreamIndex":0,
+            "MediaStreams":[{"Index":0,"Type":"Audio","Language":"eng","Codec":"aac"}]
+        }]);
+        let (result, ()) = tokio::join!(resolver.audio_options(&source), async {
+            first.auth("family", "").await;
+            first.json("GET", ITEM, metadata).await.authenticated();
+        });
+        let options = result.unwrap();
+        assert_eq!(options.source, source.to_handle());
+        assert_eq!(options.versions[0].audio_streams[0].index, 0);
+        assert_eq!(options.versions[0].runtime_ticks, Some(191429666670));
+        first.idle(2).await;
+        second.idle(0).await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn audio_candidates_reject_account_edit_during_auth_before_item_lookup() {
+    bounded(async {
+        let db = database().await;
+        let http = Fixture::new().await;
+        let account = save(&db, &http.url(), "family", true).await;
+        let source = source(&account);
+        let resolver = resolver(&db);
+        let (result, ()) = tokio::join!(resolver.audio_options(&source), async {
+            let (mut socket, request) = http.receive("POST", AUTH).await;
+            request.credentials("family", "");
+            saved_servers::upsert(
+                db.get_connection(),
+                &NewServer::new("emby", "Edited account", http.url())
+                    .with_id(Some(account.id.clone()))
+                    .with_credentials(Some("other-family".into()), None)
+                    .with_password_update(PasswordUpdate::Keep),
+                NOW,
+            )
+            .await
+            .unwrap();
+            respond(&mut socket, authentication(&identity())).await;
+        });
+        assert!(matches!(result, Err(ProviderError::Other(message))
+            if message == "saved source account changed during authentication"));
+        http.idle(1).await;
+    })
+    .await;
+}
+
 async fn lookup(
     resolver: &SourceResolver,
     source: &SourceRef,
@@ -281,6 +340,7 @@ async fn invalid_missing_unbound_and_mismatched_accounts_never_contact_http() {
         cases.push(unsupported);
         for source in cases {
             assert!(resolver(&db).validate_saved(&source).await.is_err());
+            assert!(resolver(&db).audio_options(&source).await.is_err());
             for audio in [false, true] {
                 assert!(lookup(&resolver(&db), &source, audio).await.is_err());
             }

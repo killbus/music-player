@@ -1,4 +1,6 @@
 use music_player_provider::{ConnectedProvider, Page, ProviderError, ProviderState};
+use music_player_playback::source_resolver::SourceResolver;
+use music_player_types::{audio, source::SourceRef};
 use music_player_storage::repo::album::AlbumRepository;
 use music_player_storage::repo::artist::ArtistRepository;
 use music_player_storage::repo::track::TrackRepository;
@@ -12,6 +14,7 @@ use crate::api::metadata::v1alpha1::{
 };
 use crate::api::music::v1alpha1::{
     library_service_server::LibraryService, BrowseMediaRequest, BrowseMediaResponse,
+    AudioStreamOption, AudioVersionOption, GetMediaAudioOptionsRequest, GetMediaAudioOptionsResponse,
     GetAlbumDetailsRequest, GetAlbumDetailsResponse, GetAlbumsRequest, GetAlbumsResponse,
     GetArtistDetailsRequest, GetArtistDetailsResponse, GetArtistsRequest, GetArtistsResponse,
     GetLikedTracksRequest, GetLikedTracksResponse, GetMediaBrowserRequest, GetMediaBrowserResponse,
@@ -80,8 +83,47 @@ pub(crate) fn provider_status(e: ProviderError) -> tonic::Status {
     }
 }
 
+impl From<audio::AudioOptions> for GetMediaAudioOptionsResponse {
+    fn from(options: audio::AudioOptions) -> Self {
+        Self {
+            source: options.source,
+            versions: options.versions.into_iter().map(|version| AudioVersionOption {
+                id: version.id,
+                name: version.name,
+                runtime_ticks: version.runtime_ticks,
+                default_audio_stream_index: version.default_audio_stream_index,
+                unavailable_reason: version.unavailable_reason,
+                audio_streams: version.audio_streams.into_iter().map(|stream| AudioStreamOption {
+                    index: stream.index,
+                    title: stream.title,
+                    display_title: stream.display_title,
+                    language: stream.language,
+                    codec: stream.codec,
+                    channels: stream.channels,
+                    sample_rate: stream.sample_rate,
+                    is_default: stream.is_default,
+                    unavailable_reason: stream.unavailable_reason,
+                }).collect(),
+            }).collect(),
+        }
+    }
+}
+
 #[tonic::async_trait]
 impl LibraryService for Library {
+    async fn get_media_audio_options(
+        &self,
+        request: tonic::Request<GetMediaAudioOptionsRequest>,
+    ) -> Result<tonic::Response<GetMediaAudioOptionsResponse>, tonic::Status> {
+        let source = SourceRef::parse(&request.into_inner().source)
+            .map_err(|error| tonic::Status::invalid_argument(error.to_string()))?;
+        let options = SourceResolver::from_settings(self.db.clone())
+            .audio_options(&source)
+            .await
+            .map_err(provider_status)?;
+        Ok(tonic::Response::new(options.into()))
+    }
+
     async fn get_media_browser(
         &self,
         _: tonic::Request<GetMediaBrowserRequest>,

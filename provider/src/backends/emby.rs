@@ -3,8 +3,8 @@
 //! remote identity to the saved account before publishing this provider.
 
 use crate::{
-    Album, Artist, MediaEntry, MusicProvider, Page, ProviderCapabilities, ProviderConfig,
-    ProviderError, ProviderFactory, SearchResults, Track,
+    emby_playback::MediaSource, Album, Artist, MediaEntry, MusicProvider, Page,
+    ProviderCapabilities, ProviderConfig, ProviderError, ProviderFactory, SearchResults, Track,
 };
 use music_player_settings::EmbyRuntimeSettings;
 use music_player_types::source::{RemoteIdentity, ResourceKind, SourceRef};
@@ -663,6 +663,8 @@ pub(crate) struct Item {
     pub media_type: Option<String>,
     pub is_folder: Option<bool>,
     pub run_time_ticks: Option<u64>,
+    #[serde(default)]
+    pub media_sources: Vec<MediaSource>,
     pub series_name: Option<String>,
     pub index_number: Option<u64>,
     pub parent_index_number: Option<u64>,
@@ -712,3 +714,6 @@ mod tests;
 
 #[cfg(test)]
 mod factory_tests;
+
+#[cfg(test)]
+mod audio_options_tests;

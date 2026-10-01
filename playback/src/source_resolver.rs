@@ -8,6 +8,7 @@ use music_player_provider::{
 };
 use music_player_storage::{saved_servers, saved_servers::SavedServer, Database};
 use music_player_types::{
+    audio::AudioOptions,
     source::{ResourceKind, SourceRef},
     types::Track,
 };
@@ -49,6 +50,16 @@ impl SourceResolver {
         })
         .await
         .map_err(|_| failure("saved source resolution timed out"))?
+    }
+
+    /// Read selectable metadata through the source's saved account. Browsing
+    /// another server never changes this lookup, and no playback lease is opened.
+    pub async fn audio_options(&self, source: &SourceRef) -> Result<AudioOptions, ProviderError> {
+        tokio::time::timeout(RESOLVE_TIMEOUT, async {
+            self.authenticated(source).await?.audio_options(source).await
+        })
+        .await
+        .map_err(|_| failure("saved source audio options lookup timed out"))?
     }
 
     /// Resolve an id-only queue entry through its stable handle, never a bare

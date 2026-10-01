@@ -6,7 +6,8 @@ use crate::{
 use async_trait::async_trait;
 use music_player_entity::track::Model as Track;
 use music_player_settings::{get_application_directory, read_settings, AudioSettings, Settings};
-use music_player_tracklist::{PlaybackState, Tracklist};
+use music_player_tracklist::{validate_entries, PlaybackState, QueueEntry, Tracklist};
+use music_player_types::audio::AudioSelection;
 use music_player_types::source::{normalize_track, ResourceKind, SourceRef};
 use rockbox_playback::{
     CrossfadeMode, CrossfadeSettings, EqBand, Equalizer, MixMode, OutputConfig,
@@ -510,11 +511,27 @@ impl PlayerInternal {
     }
 
     fn load_source(&mut self, source: SourceRef, target: Duration, playing: bool) {
+        let entry = self
+            .tracklist
+            .lock()
+            .unwrap()
+            .current_entry()
+            .filter(|entry| entry.track.uri == source.to_handle());
         let Some(playback) = self.source_playback.as_mut() else {
             error!("saved-account playback is unavailable in this player");
             return;
         };
-        if let Err(error) = playback.load(source, target, playing) {
+        let result = match entry {
+            Some(entry) => playback.load_occurrence(
+                source,
+                entry.occurrence_id.clone(),
+                entry.effective_selection(),
+                target,
+                playing,
+            ),
+            None => playback.load(source, target, playing),
+        };
+        if let Err(error) = result {
             error!(%error, "source playback rejected");
             return;
         }
@@ -537,6 +554,16 @@ impl PlayerInternal {
             return;
         };
         playback.poll(&self.engine);
+        if let Some((occurrence_id, pin)) = playback.accepted_pin() {
+            let mut queue = self.tracklist.lock().unwrap();
+            if queue.current_entry().is_some_and(|entry| {
+                entry.occurrence_id == occurrence_id && entry.pin.as_ref() != Some(pin)
+            }) {
+                if let Err(error) = queue.accept_current_pin(occurrence_id, pin.clone()) {
+                    error!(error, "could not retain the accepted audio choice");
+                }
+            }
+        }
         let snapshot = playback.snapshot();
         let error = playback.error().map(str::to_owned);
         let position = snapshot
@@ -682,20 +709,41 @@ impl PlayerInternal {
         if !self.resume {
             return;
         }
-        let (played, tracks) = self.tracklist.lock().unwrap().tracks();
+        let (played, tracks, current) = {
+            let queue = self.tracklist.lock().unwrap();
+            let (played, tracks) = queue.entries();
+            (played, tracks, queue.current_entry())
+        };
         let path = queue_file();
         if played.is_empty() && tracks.is_empty() {
             let _ = std::fs::remove_file(&path);
             return;
         }
+        // A removed current item may continue sounding, but its position
+        // must not become the checkpoint of the last retained history item.
+        let position_ms = if current.as_ref().is_some_and(|current| {
+            played
+                .last()
+                .is_none_or(|last| last.occurrence_id != current.occurrence_id)
+        }) {
+            0
+        } else {
+            self.position_ms
+        };
         let saved = SavedQueue {
+            version: 2,
             source_checkpoint: self
                 .source_playback
                 .as_ref()
-                .and_then(SourcePlayback::checkpoint),
+                .and_then(SourcePlayback::checkpoint)
+                .filter(|checkpoint| {
+                    played
+                        .last()
+                        .is_some_and(|entry| entry.occurrence_id == checkpoint.occurrence_id)
+                }),
             played,
             tracks,
-            position_ms: self.position_ms,
+            position_ms,
             shuffle: self.shuffle,
             repeat_mode: self.repeat_mode,
         };
@@ -720,10 +768,11 @@ impl PlayerInternal {
         let Ok(mut saved) = serde_json::from_str::<SavedQueue>(&raw) else {
             return;
         };
-        if normalize_queue(&mut saved.played).is_err()
-            || normalize_queue(&mut saved.tracks).is_err()
-        {
-            error!("saved queue has invalid source references");
+        if let Err(error) = saved.prepare() {
+            error!(
+                error,
+                "saved queue has invalid source references or audio choices"
+            );
             return;
         }
         if saved.played.is_empty() && saved.tracks.is_empty() {
@@ -732,8 +781,8 @@ impl PlayerInternal {
         let managed_source = saved
             .played
             .last()
-            .filter(|t| SourceRef::is_handle(&t.uri))
-            .and_then(|t| SourceRef::parse(&t.uri).ok());
+            .filter(|entry| SourceRef::is_handle(&entry.track.uri))
+            .and_then(|entry| SourceRef::parse(&entry.track.uri).ok());
         if let Some(source) = managed_source {
             let Some(playback) = self.source_playback.as_mut() else {
                 error!("saved queue needs an account resolver");
@@ -741,7 +790,19 @@ impl PlayerInternal {
             };
             let restored = match saved.source_checkpoint.take() {
                 Some(checkpoint) => playback.restore(source, checkpoint),
-                None if saved.position_ms == 0 => playback.load(source, Duration::ZERO, false),
+                None if saved.position_ms == 0 => {
+                    let entry = saved
+                        .played
+                        .last()
+                        .expect("managed source came from the current entry");
+                    playback.load_occurrence(
+                        source,
+                        entry.occurrence_id.clone(),
+                        entry.effective_selection(),
+                        Duration::ZERO,
+                        false,
+                    )
+                }
                 None => Err(music_player_provider::ProviderError::Other(
                     "saved audio position has no pinned selection".into(),
                 )),
@@ -759,7 +820,8 @@ impl PlayerInternal {
             self.tracklist
                 .lock()
                 .unwrap()
-                .restore(saved.played, saved.tracks, saved.position_ms);
+                .restore_entries(saved.played, saved.tracks, saved.position_ms)
+                .expect("saved queue was validated before playback restore");
             self.track_loaded = true;
             self.engine_started = false;
             self.source_phase = None;
@@ -777,11 +839,12 @@ impl PlayerInternal {
         self.repeat_mode = saved.repeat_mode.clamp(0, 2);
         self.publish_modes();
 
-        let current_uri = saved.played.last().map(|t| t.uri.clone());
+        let current_uri = saved.played.last().map(|entry| entry.track.uri.clone());
         self.tracklist
             .lock()
             .unwrap()
-            .restore(saved.played, saved.tracks, saved.position_ms);
+            .restore_entries(saved.played, saved.tracks, saved.position_ms)
+            .expect("saved queue was validated before playback restore");
         let Some(uri) = current_uri else { return };
         let uri = music_player_storage::track_cache::resolve(&uri);
         self.engine.stop();
@@ -1135,6 +1198,26 @@ impl PlayerInternal {
                 tracks,
                 start_index,
             } => self.handle_command_load_tracklist(tracks, start_index),
+            PlayerCommand::LoadSelectedTracks {
+                tracks,
+                start_index,
+                reply,
+            } => {
+                let result = self
+                    .handle_load_selected_tracks(tracks, start_index)
+                    .map_err(str::to_owned);
+                let _ = reply.send(result);
+            }
+            PlayerCommand::SelectAudio {
+                occurrence_id,
+                selection,
+                reply,
+            } => {
+                let result = self
+                    .handle_select_audio(&occurrence_id, selection)
+                    .map_err(str::to_owned);
+                let _ = reply.send(result);
+            }
             PlayerCommand::Play => self.handle_play(),
             PlayerCommand::Pause => self.handle_pause(),
             PlayerCommand::Stop => self.handle_player_stop(),
@@ -1346,6 +1429,88 @@ impl PlayerInternal {
         }
     }
 
+    fn handle_load_selected_tracks(
+        &mut self,
+        mut tracks: Vec<(Track, AudioSelection)>,
+        start_index: Option<usize>,
+    ) -> Result<Vec<String>, &'static str> {
+        if tracks.is_empty() {
+            return if start_index.is_some() {
+                Err("an empty batch has no playback start index")
+            } else {
+                Ok(Vec::new())
+            };
+        }
+        if let Some(index) = start_index {
+            let queue = self.tracklist.lock().unwrap();
+            let (_, played_count) = queue.current_track();
+            let total = played_count
+                .checked_add(queue.len())
+                .and_then(|len| len.checked_add(tracks.len()))
+                .ok_or("queue size exceeds supported bounds")?;
+            if index >= total {
+                return Err("playback start index is outside the resulting queue");
+            }
+        }
+        for (track, _) in &mut tracks {
+            normalize_queue(std::slice::from_mut(track)).map_err(|_| "invalid queue source")?;
+        }
+        let ids = self
+            .tracklist
+            .lock()
+            .unwrap()
+            .queue_with_selection(tracks)?;
+        if self.shuffle {
+            self.tracklist.lock().unwrap().shuffle();
+        }
+        if self.tracklist.lock().unwrap().current_entry().is_some() {
+            self.resync_engine_next();
+        } else {
+            match start_index.filter(|index| *index > 0) {
+                Some(index) => self.handle_play_track_at(index),
+                None => self.handle_next(),
+            }
+        }
+        self.save_queue();
+        Ok(ids)
+    }
+
+    fn handle_select_audio(
+        &mut self,
+        occurrence_id: &str,
+        selection: AudioSelection,
+    ) -> Result<(), &'static str> {
+        // Check before mutation: changing a current selection needs this player
+        // to be able to cancel and replace its managed playback.
+        if self.source_playback.is_none() {
+            return Err("saved-account playback is unavailable in this player");
+        }
+        let is_current = self
+            .tracklist
+            .lock()
+            .unwrap()
+            .select_audio(occurrence_id, selection)?;
+        if is_current {
+            let entry = self
+                .tracklist
+                .lock()
+                .unwrap()
+                .current_entry()
+                .ok_or("current queue occurrence is missing")?;
+            let source =
+                SourceRef::parse(&entry.track.uri).map_err(|_| "invalid current source")?;
+            let playing = self
+                .source_playback
+                .as_ref()
+                .is_some_and(|playback| playback.snapshot().desired == DesiredState::Playing);
+            // A deliberate new choice starts at zero. Retry/resume still keeps
+            // the existing pin and checkpoint through the normal commands.
+            self.load_source(source, Duration::ZERO, playing);
+        }
+        self.save_queue();
+        Ok(())
+    }
+
     fn handle_play(&mut self) {
         if self.has_managed_source() {
             self.source_playback.as_mut().unwrap().play();
@@ -1486,6 +1651,11 @@ impl PlayerInternal {
             self.handle_player_stop();
             self.source_playback.as_mut().unwrap().clear();
             self.source_phase = None;
+            self.position_ms = 0;
+            self.last_broadcast_position_ms = 0;
+            let mut queue = self.tracklist.lock().unwrap();
+            queue.stop();
+            queue.set_playback_state(PlaybackState::default());
         }
         self.tracklist.lock().unwrap().clear();
         if self.resume {
@@ -1539,6 +1709,16 @@ impl PlayerInternal {
 // deliberately left as-is.
 #[allow(clippy::large_enum_variant)]
 pub enum PlayerCommand {
+    LoadSelectedTracks {
+        tracks: Vec<(Track, AudioSelection)>,
+        start_index: Option<usize>,
+        reply: tokio::sync::oneshot::Sender<Result<Vec<String>, String>>,
+    },
+    SelectAudio {
+        occurrence_id: String,
+        selection: AudioSelection,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
     Load {
         track_id: String,
     },
@@ -1657,9 +1837,11 @@ pub fn normalize_queue(
 #[derive(Serialize, Deserialize, Default)]
 struct SavedQueue {
     #[serde(default)]
+    version: u32,
+    #[serde(default)]
     source_checkpoint: Option<SourceCheckpoint>,
-    played: Vec<Track>,
-    tracks: Vec<Track>,
+    played: Vec<QueueEntry>,
+    tracks: Vec<QueueEntry>,
     position_ms: u32,
     /// Shuffle and repeat, so a restart resumes the session as it was rather
     /// than silently reverting to off. Defaulted so a queue written by an
@@ -1670,10 +1852,339 @@ struct SavedQueue {
     repeat_mode: i32,
 }
 
+impl SavedQueue {
+    fn prepare(&mut self) -> Result<(), &'static str> {
+        if self.version != 0 && self.version != 2 {
+            return Err("unsupported queue snapshot version");
+        }
+        for entry in self.played.iter_mut().chain(self.tracks.iter_mut()) {
+            normalize_queue(std::slice::from_mut(&mut entry.track))
+                .map_err(|_| "invalid saved queue source")?;
+        }
+        if let Some(checkpoint) = &self.source_checkpoint {
+            let current = self
+                .played
+                .last_mut()
+                .ok_or("audio checkpoint has no queue occurrence")?;
+            if checkpoint.version != 1 || checkpoint.source != current.track.uri {
+                return Err("audio checkpoint belongs to a different source");
+            }
+            if self.version == 0 {
+                // Old snapshots stored a choice only for the current source.
+                current.occurrence_id = checkpoint.occurrence_id.clone();
+                match &checkpoint.selection {
+                    AudioSelection::Pinned(pin) => {
+                        current.selection = AudioSelection::Auto;
+                        current.pin = Some(pin.clone());
+                    }
+                    requested => {
+                        current.selection = requested.clone();
+                        current.pin = None;
+                    }
+                }
+            }
+            if checkpoint.occurrence_id != current.occurrence_id
+                || checkpoint.selection != current.effective_selection()
+            {
+                return Err("audio checkpoint belongs to a different occurrence or choice");
+            }
+        }
+        validate_entries(self.played.iter().chain(self.tracks.iter()))?;
+        self.version = 2;
+        Ok(())
+    }
+}
+
 fn queue_file() -> PathBuf {
     PathBuf::from(get_application_directory())
         .join("cache")
         .join("queue.json")
+}
+
+#[cfg(test)]
+mod queue_snapshot_tests {
+    use super::*;
+    use music_player_types::source::RemoteIdentity;
+
+    // Use an isolated TCP output, without a sound device or user settings.
+    // These tests exercise host command handling; they do not play audio.
+    fn host(queue: Tracklist) -> (PlayerInternal, std::net::TcpListener) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let output = format!("tcp:{}", listener.local_addr().unwrap())
+            .parse::<OutputConfig>()
+            .unwrap();
+        let engine = PlayerConfig::builder().output(output).open().unwrap();
+        let (_, commands) = mpsc::unbounded_channel();
+        (
+            PlayerInternal {
+                source_playback: None,
+                source_phase: None,
+                music_crossfade: CrossfadeSettings::default(),
+                commands: Arc::new(std::sync::Mutex::new(commands)),
+                engine,
+                event_senders: Vec::new(),
+                tracklist: Arc::new(std::sync::Mutex::new(queue)),
+                position_ms: 0,
+                last_broadcast_position_ms: 0,
+                track_loaded: false,
+                engine_started: false,
+                last_duration_ms: 0,
+                shuffle: false,
+                repeat_mode: 0,
+                engine_index: 0,
+                resume: false,
+                last_queue_save: Instant::now(),
+                prefetched: None,
+                prefetch_landed: Arc::new(AtomicBool::new(false)),
+                stopped_ticks: 0,
+                loaded_at: Instant::now(),
+                expect_playback: false,
+                open_attempts: 0,
+                open_attempts_uri: None,
+                icy_station: None,
+                icy_last: None,
+                event_broadcaster: Box::new(|_| {}),
+            },
+            listener,
+        )
+    }
+
+    #[test]
+    fn selected_empty_and_out_of_bounds_batches_leave_the_host_queue_unchanged() {
+        let mut queue = Tracklist::new(vec![entry().track, entry().track, entry().track]);
+        queue.next_track();
+        let expected = queue.entries();
+        let current = queue.current_entry();
+        let (mut player, _listener) = host(queue);
+        player.shuffle = true;
+        assert!(player
+            .handle_load_selected_tracks(Vec::new(), None)
+            .unwrap()
+            .is_empty());
+        assert!(player
+            .handle_load_selected_tracks(Vec::new(), Some(0))
+            .is_err());
+        // Three existing occurrences plus one new occurrence: index 4 is invalid.
+        assert!(player
+            .handle_load_selected_tracks(vec![(entry().track, AudioSelection::Auto)], Some(4))
+            .is_err());
+        assert!(player
+            .handle_load_selected_tracks(
+                vec![(entry().track, AudioSelection::Auto)],
+                Some(usize::MAX)
+            )
+            .is_err());
+        assert_eq!(player.tracklist.lock().unwrap().entries(), expected);
+        assert_eq!(player.tracklist.lock().unwrap().current_entry(), current);
+        assert!(!player.track_loaded);
+    }
+
+    #[tokio::test]
+    async fn managed_clear_removes_current_occurrence_and_resets_position() {
+        let mut queue = Tracklist::new(vec![entry().track, entry().track]);
+        queue.next_track();
+        let current = queue.current_entry().unwrap();
+        queue.set_playback_state(PlaybackState {
+            position_ms: 7200123,
+            is_playing: false,
+        });
+        let (mut player, _listener) = host(queue);
+        let db = music_player_storage::Database {
+            connection: sea_orm::Database::connect("sqlite::memory:").await.unwrap(),
+        };
+        let mut source = SourcePlayback::new(SourceResolver::new(db, "ci-host".into(), true));
+        // A paused occurrence has no resolver task or network session.
+        source
+            .load_occurrence(
+                SourceRef::parse(&current.track.uri).unwrap(),
+                current.occurrence_id,
+                AudioSelection::Auto,
+                Duration::from_millis(7200123),
+                false,
+            )
+            .unwrap();
+        player.source_playback = Some(source);
+        player.position_ms = 7200123;
+        player.last_broadcast_position_ms = 7200123;
+        player.track_loaded = true;
+        player.handle_clear();
+        assert!(!player.has_managed_source());
+        assert_eq!(player.position_ms, 0);
+        assert_eq!(player.last_broadcast_position_ms, 0);
+        assert!(!player.track_loaded);
+        let queue = player.tracklist.lock().unwrap();
+        assert!(queue.current_entry().is_none());
+        assert_eq!(queue.entries(), (Vec::new(), Vec::new()));
+        assert_eq!(queue.playback_state(), PlaybackState::default());
+    }
+
+    #[tokio::test]
+    async fn audio_command_edits_one_occurrence_and_keeps_current_selection_paused() {
+        let mut queue = Tracklist::new(vec![entry().track, entry().track]);
+        queue.next_track();
+        let current = queue.current_entry().unwrap();
+        let upcoming = queue.entries().1[0].clone();
+        let (mut player, _listener) = host(queue);
+        let db = music_player_storage::Database {
+            connection: sea_orm::Database::connect("sqlite::memory:").await.unwrap(),
+        };
+        let mut source = SourcePlayback::new(SourceResolver::new(db, "ci-host".into(), true));
+        source
+            .load_occurrence(
+                SourceRef::parse(&current.track.uri).unwrap(),
+                current.occurrence_id.clone(),
+                AudioSelection::Auto,
+                Duration::from_millis(7200123),
+                false,
+            )
+            .unwrap();
+        player.source_playback = Some(source);
+        player.position_ms = 7200123;
+        let choice = AudioSelection::Explicit {
+            media_source_id: "version-b".into(),
+            audio_stream_index: 0,
+        };
+
+        let (reply, received) = tokio::sync::oneshot::channel();
+        player
+            .handle_command(PlayerCommand::SelectAudio {
+                occurrence_id: upcoming.occurrence_id.clone(),
+                selection: choice.clone(),
+                reply,
+            })
+            .unwrap();
+        assert_eq!(received.await.unwrap(), Ok(()));
+        let checkpoint = player
+            .source_playback
+            .as_ref()
+            .unwrap()
+            .checkpoint()
+            .unwrap();
+        assert_eq!(checkpoint.occurrence_id, current.occurrence_id);
+        assert_eq!(checkpoint.offset_ms, 7200123);
+        assert_eq!(checkpoint.selection, AudioSelection::Auto);
+        assert_eq!(player.position_ms, 7200123);
+        let expected_upcoming = player.tracklist.lock().unwrap().entries().1;
+        assert_eq!(expected_upcoming[0].selection, choice);
+
+        let (reply, received) = tokio::sync::oneshot::channel();
+        player
+            .handle_command(PlayerCommand::SelectAudio {
+                occurrence_id: current.occurrence_id.clone(),
+                selection: choice.clone(),
+                reply,
+            })
+            .unwrap();
+        assert_eq!(received.await.unwrap(), Ok(()));
+        let playback = player.source_playback.as_ref().unwrap();
+        let checkpoint = playback.checkpoint().unwrap();
+        assert_eq!(checkpoint.occurrence_id, current.occurrence_id);
+        assert_eq!(checkpoint.offset_ms, 0);
+        assert_eq!(checkpoint.selection, choice);
+        assert_eq!(playback.snapshot().desired, DesiredState::Paused);
+        assert!(playback.accepted_pin().is_none());
+        assert_eq!(player.position_ms, 0);
+        let queue = player.tracklist.lock().unwrap();
+        assert_eq!(queue.entries().1, expected_upcoming);
+        assert_eq!(
+            queue.current_entry().unwrap().occurrence_id,
+            current.occurrence_id
+        );
+        assert_eq!(queue.current_entry().unwrap().selection, choice);
+        assert!(!queue.playback_state().is_playing);
+    }
+
+    fn entry() -> QueueEntry {
+        let handle = SourceRef {
+            resolver: "emby".into(),
+            account_id: "saved-family".into(),
+            remote: RemoteIdentity {
+                server_id: "server-a".into(),
+                user_id: "family".into(),
+            },
+            kind: ResourceKind::Item,
+            item_id: "55508".into(),
+        }
+        .to_handle();
+        QueueEntry::new(Track {
+            id: handle.clone(),
+            uri: handle,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn legacy_track_snapshot_assigns_distinct_occurrences() {
+        let track = entry().track;
+        let raw = serde_json::json!({ "played": [track.clone()], "tracks": [track], "position_ms": 1234 });
+        let mut saved: SavedQueue = serde_json::from_value(raw).unwrap();
+        saved.prepare().unwrap();
+        assert_eq!(saved.version, 2);
+        assert_ne!(saved.played[0].occurrence_id, saved.tracks[0].occurrence_id);
+        assert_eq!(saved.played[0].effective_selection(), AudioSelection::Auto);
+        assert_eq!(saved.position_ms, 1234);
+    }
+
+    #[test]
+    fn legacy_checkpoint_migrates_pin_and_keeps_long_position() {
+        let current = entry();
+        let pin = music_player_types::audio::AudioPin {
+            media_source_id: "version-a".into(),
+            audio_stream_index: 0,
+            runtime_ticks: Some(191429666670),
+            etag: Some("revision-a".into()),
+            codec: Some("aac".into()),
+            channels: Some(2),
+            sample_rate: Some(44100),
+        };
+        let checkpoint = SourceCheckpoint {
+            version: 1,
+            occurrence_id: current.occurrence_id.clone(),
+            source: current.track.uri.clone(),
+            offset_ms: 7200123,
+            selection: AudioSelection::Pinned(pin.clone()),
+        };
+        let raw = serde_json::json!({ "played": [current.track.clone()], "tracks": [current.track],
+            "position_ms": 7200123, "source_checkpoint": checkpoint });
+        let mut saved: SavedQueue = serde_json::from_value(raw).unwrap();
+        saved.prepare().unwrap();
+        assert_eq!(saved.played[0].occurrence_id, current.occurrence_id);
+        assert_eq!(saved.played[0].selection, AudioSelection::Auto);
+        assert_eq!(saved.played[0].pin, Some(pin));
+        assert_eq!(saved.tracks[0].pin, None);
+        let bytes = serde_json::to_vec(&saved).unwrap();
+        let mut restored: SavedQueue = serde_json::from_slice(&bytes).unwrap();
+        restored.prepare().unwrap();
+        assert_eq!(restored.played, saved.played);
+        assert_eq!(restored.tracks, saved.tracks);
+        assert_eq!(restored.source_checkpoint.unwrap().offset_ms, 7200123);
+    }
+
+    #[test]
+    fn checkpoint_for_same_item_but_other_occurrence_or_choice_is_rejected() {
+        let current = entry();
+        let mut saved = SavedQueue {
+            version: 2,
+            played: vec![current.clone()],
+            source_checkpoint: Some(SourceCheckpoint {
+                version: 1,
+                occurrence_id: uuid::Uuid::new_v4().to_string(),
+                source: current.track.uri.clone(),
+                offset_ms: 1234,
+                selection: AudioSelection::Auto,
+            }),
+            ..Default::default()
+        };
+        assert!(saved.prepare().is_err());
+        saved.source_checkpoint.as_mut().unwrap().occurrence_id = current.occurrence_id;
+        saved.source_checkpoint.as_mut().unwrap().selection = AudioSelection::Explicit {
+            media_source_id: "version-b".into(),
+            audio_stream_index: 3,
+        };
+        assert!(saved.prepare().is_err());
+        saved.source_checkpoint.as_mut().unwrap().selection = AudioSelection::Auto;
+        saved.prepare().unwrap();
+    }
 }
 
 /// How often the queue snapshot is refreshed while playing (track changes

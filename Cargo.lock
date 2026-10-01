@@ -8724,7 +8724,10 @@ version = "0.4.5"
 dependencies = [
  "atlist-rs",
  "music-player-entity",
+ "music-player-types",
  "rand 0.8.8",
+ "serde",
+ "uuid",
 ]
 
 [[package]]
@@ -8746,6 +8749,7 @@ dependencies = [
  "music-player-discovery",
  "music-player-settings",
  "rockbox-metadata",
+ "serde",
  "upnp-client",
  "url",
 ]

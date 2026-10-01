@@ -7,6 +7,8 @@ import {
   browserKey, fetchMediaBrowser, isSourceMutation, useMediaPages, type MediaEntry,
 } from "./api";
 import { errorMessage, useMediaQueue } from "./useMediaQueue";
+import AudioChoiceEditor from "./AudioChoiceEditor";
+import type { AudioChoice } from "./api";
 
 export default function MediaBrowser() {
   const client = useQueryClient();
@@ -120,6 +122,7 @@ function AccountMedia({ serverId }: { serverId: string }) {
             onOpen={() => navigate([...path, { id: entry.id, title: entry.title }])}
             onQueue={() => { void actions.queueContainer(entry.id); }}
             onPlay={() => { if (entry.track) void actions.leaf(entry.track.id, false); }}
+            onAudio={(choice) => { if (entry.track) void actions.selected(entry.track, choice); }}
             onNext={() => { if (entry.track) void actions.leaf(entry.track.id, true); }} />
         ))}
       </ul>
@@ -132,10 +135,12 @@ function AccountMedia({ serverId }: { serverId: string }) {
   );
 }
 
-function MediaRow({ entry, busy, onOpen, onQueue, onPlay, onNext }: {
+function MediaRow({ entry, busy, onOpen, onQueue, onPlay, onNext, onAudio }: {
   entry: MediaEntry; busy: boolean;
   onOpen: () => void; onQueue: () => void; onPlay: () => void; onNext: () => void;
+  onAudio: (choice: AudioChoice) => void;
 }) {
+  const [choosing, setChoosing] = useState(false);
   const playable = !entry.isContainer && entry.track &&
     (entry.mediaType === "Audio" || entry.mediaType === "Video");
   // Keep decimal strings intact: season indices can exceed JS's exact integers.
@@ -164,8 +169,13 @@ function MediaRow({ entry, busy, onOpen, onQueue, onPlay, onNext }: {
             aria-label={`Listen to ${entry.title}`}>Listen</Button>
           <Button variant="ghost" disabled={busy} onClick={onNext}
             aria-label={`Play next: ${entry.title}`}>Play next</Button>
+          <Button variant="outline" disabled={busy} onClick={() => setChoosing(!choosing)}
+            aria-expanded={choosing} aria-label={`Choose audio: ${entry.title}`}>Audio tracks</Button>
         </div>
       ) : null}
+      {choosing && playable && entry.track && <div className="w-full">
+        <AudioChoiceEditor key={entry.track.id} source={entry.track.id} busy={busy} onSubmit={onAudio} />
+      </div>}
     </li>
   );
 }

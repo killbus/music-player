@@ -528,6 +528,7 @@ pub fn ui_show_album_detail(app: &AppWindow, detail: rpc::AlbumDetailData) {
     app.set_detail_meta(meta.into());
     app.set_detail_label(detail.label.into());
     app.set_detail_tracks(ModelRc::new(VecModel::from(rows)));
+    media::invalidate(app);
     app.set_show_detail(true);
     app.set_detail_loading(false);
 }
@@ -582,6 +583,7 @@ pub fn ui_show_artist_detail(app: &AppWindow, id: &str) {
     app.set_artist_detail_meta(meta.into());
     app.set_artist_detail_albums(ModelRc::new(VecModel::from(albums)));
     app.set_artist_detail_tracks(ModelRc::new(VecModel::from(tracks)));
+    media::invalidate(app);
     app.set_show_artist(true);
 }
 
@@ -758,6 +760,7 @@ pub fn ui_show_playlist(
     app.set_pl_detail_tracks(ModelRc::new(VecModel::from(items)));
     app.set_pl_detail_loading(false);
     app.set_pl_detail_open(true);
+    media::invalidate(app);
     app.set_current_tab(5);
     if open_picker {
         app.invoke_open_track_picker();

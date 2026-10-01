@@ -9,7 +9,7 @@ use self::{
     devices::{DevicesMutation, DevicesQuery, DevicesSubscription},
     extensions::{ExtensionsMutation, ExtensionsQuery},
     library::{LibraryMutation, LibraryQuery},
-    media::MediaQuery,
+    media::{MediaMutation, MediaQuery},
     mixer::{MixerMutation, MixerQuery},
     playback::{PlaybackMutation, PlaybackQuery, PlaybackSubscription},
     playlist::{PlaylistMutation, PlaylistQuery, PlaylistSubscription},
@@ -56,6 +56,7 @@ pub struct Query(
 pub struct Mutation(
     DevicesMutation,
     LibraryMutation,
+    MediaMutation,
     MixerMutation,
     PlaybackMutation,
     PlaylistMutation,

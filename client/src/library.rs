@@ -3,6 +3,7 @@ use music_player_server::api::{
     metadata::v1alpha1::{Album, Artist, Track},
     music::v1alpha1::{
         library_service_client::LibraryServiceClient, BrowseMediaRequest, BrowseMediaResponse,
+        GetMediaAudioOptionsRequest, GetMediaAudioOptionsResponse,
         GetAlbumDetailsRequest, GetAlbumsRequest, GetArtistDetailsRequest, GetArtistsRequest,
         GetMediaBrowserRequest, GetMediaContainerTracksRequest, GetMediaContainerTracksResponse,
         GetTrackDetailsRequest, GetTracksRequest, MediaBrowser, SearchRequest, SearchResponse,
@@ -15,6 +16,13 @@ pub struct LibraryClient {
 }
 
 impl LibraryClient {
+    /// Read choices through the saved account in the source. An old daemon's
+    /// Unimplemented result is preserved for the caller to explain.
+    pub async fn media_audio_options(&mut self, source: &str) -> Result<GetMediaAudioOptionsResponse, Error> {
+        Ok(self.client.get_media_audio_options(GetMediaAudioOptionsRequest { source: source.into() })
+            .await?.into_inner())
+    }
+
     /// Older daemons return Unimplemented; do not substitute their music list.
     pub async fn media_browser(&mut self) -> Result<Option<MediaBrowser>, Error> {
         Ok(self

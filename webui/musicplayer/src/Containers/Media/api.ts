@@ -30,6 +30,65 @@ export type MediaBrowserResult = {
   mediaBrowser: { serverId: string; supported: boolean } | null;
 };
 
+export type AudioChoice = { mediaSourceId?: string; audioStreamIndex?: number };
+export type MediaQueueOccurrence = {
+  occurrenceId: string; track: MediaTrack;
+  choice: { mediaSourceId: string | null; audioStreamIndex: number | null };
+  acceptedAudio: { mediaSourceId: string; audioStreamIndex: number; runtimeTicks: string | null } | null;
+};
+export type MediaQueue = {
+  current: MediaQueueOccurrence | null; played: MediaQueueOccurrence[]; upcoming: MediaQueueOccurrence[];
+};
+
+export async function fetchMediaQueue(signal: AbortSignal): Promise<MediaQueue> {
+  const fields = `occurrenceId track { id title uri duration discNumber trackNumber }
+    choice { mediaSourceId audioStreamIndex } acceptedAudio { mediaSourceId audioStreamIndex runtimeTicks }`;
+  const data = await request<{ mediaQueue: MediaQueue }>(`query MediaQueue {
+    mediaQueue { current { ${fields} } played { ${fields} } upcoming { ${fields} } }
+  }`, {}, signal);
+  return data.mediaQueue;
+}
+
+export async function selectMediaAudio(occurrenceId: string, choice: AudioChoice, signal: AbortSignal) {
+  const data = await request<{ selectMediaAudio: boolean }>(`
+    mutation SelectMediaAudio($occurrenceId: ID!, $choice: AudioChoiceInput!) {
+      selectMediaAudio(occurrenceId: $occurrenceId, choice: $choice)
+    }`, { occurrenceId, choice }, signal);
+  if (!data.selectMediaAudio) throw new Error("The audio choice was not accepted");
+}
+export type AudioOptions = {
+  source: string;
+  versions: {
+    id: string; name: string | null; runtimeTicks: string | null;
+    defaultAudioStreamIndex: number | null; unavailableReason: string | null;
+    audioStreams: {
+      index: number; title: string | null; displayTitle: string | null;
+      language: string | null; codec: string | null; channels: number | null;
+      sampleRate: number | null; isDefault: boolean; unavailableReason: string | null;
+    }[];
+  }[];
+};
+
+export async function fetchAudioOptions(source: string, signal: AbortSignal): Promise<AudioOptions> {
+  const data = await request<{ mediaAudioOptions: AudioOptions }>(`
+    query MediaAudioOptions($source: ID!) { mediaAudioOptions(source: $source) {
+      source versions { id name runtimeTicks defaultAudioStreamIndex unavailableReason
+        audioStreams { index title displayTitle language codec channels sampleRate isDefault unavailableReason }
+      }
+    } }`, { source }, signal);
+  if (data.mediaAudioOptions?.source !== source) throw new Error("Audio options belong to another item");
+  return data.mediaAudioOptions;
+}
+
+export async function addSelectedMedia(track: MediaTrack, choice: AudioChoice, signal: AbortSignal) {
+  const { id, title, uri, duration, discNumber, trackNumber } = track;
+  const data = await request<{ addSelectedMedia: string[] }>(`
+    mutation AddSelectedMedia($entries: [SelectedMediaInput!]!) { addSelectedMedia(entries: $entries) }`,
+    { entries: [{ track: { id, title, uri, duration, discNumber, trackNumber }, choice }] }, signal);
+  if (data.addSelectedMedia.length !== 1) throw new Error("The queue update was not accepted");
+  return data.addSelectedMedia[0];
+}
+
 const TRACK_FIELDS = "id title uri duration discNumber trackNumber";
 const BROWSER = `query MediaBrowser { mediaBrowser { serverId supported } }`;
 const BROWSE = `

@@ -24,11 +24,11 @@ type Completion = (
 /// No URL, headers or session token. Offset is an output delivery estimate.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SourceCheckpoint {
-    version: u32,
-    occurrence_id: String,
-    source: String,
-    offset_ms: u64,
-    selection: AudioSelection,
+    pub(crate) version: u32,
+    pub(crate) occurrence_id: String,
+    pub(crate) source: String,
+    pub(crate) offset_ms: u64,
+    pub(crate) selection: AudioSelection,
 }
 
 pub(crate) struct SourcePlayback {
@@ -63,6 +63,12 @@ impl SourcePlayback {
     }
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+    pub fn accepted_pin(&self) -> Option<(&str, &music_player_types::audio::AudioPin)> {
+        let AudioSelection::Pinned(pin) = &self.selection else {
+            return None;
+        };
+        Some((&self.occurrence.as_ref()?.id, pin))
     }
     pub fn checkpoint(&self) -> Option<SourceCheckpoint> {
         let occurrence = self.occurrence.as_ref()?;
@@ -120,16 +126,33 @@ impl SourcePlayback {
         target: Duration,
         playing: bool,
     ) -> Result<(), ProviderError> {
-        if source.kind != ResourceKind::Item {
+        self.load_occurrence(
+            source,
+            uuid::Uuid::new_v4().to_string(),
+            AudioSelection::Auto,
+            target,
+            playing,
+        )
+    }
+
+    pub fn load_occurrence(
+        &mut self,
+        source: SourceRef,
+        occurrence_id: String,
+        selection: AudioSelection,
+        target: Duration,
+        playing: bool,
+    ) -> Result<(), ProviderError> {
+        if source.kind != ResourceKind::Item || uuid::Uuid::parse_str(&occurrence_id).is_err() {
             return Err(ProviderError::Other(
-                "a media container cannot be played".into(),
+                "a playable source and valid queue occurrence are required".into(),
             ));
         }
         let occurrence = Occurrence {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: occurrence_id,
             source,
         };
-        self.selection = AudioSelection::Auto;
+        self.selection = selection;
         self.error = None;
         let request = self.coordinator.load(occurrence.clone(), target, playing);
         self.occurrence = Some(occurrence);

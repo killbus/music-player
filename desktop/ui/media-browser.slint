@@ -7,6 +7,8 @@ export struct MediaItem {
     subtitle: string,
     is-container: bool,
     playable: bool,
+    is-audio-option: bool,
+    is-occurrence: bool,
 }
 
 export struct MediaCrumb {
@@ -14,7 +16,7 @@ export struct MediaCrumb {
 }
 
 // Text actions use the same skin tokens as the rest of the desktop.
-component MediaButton inherits Rectangle {
+export component MediaButton inherits Rectangle {
     in property <string> label;
     in property <bool> enabled: true;
     callback clicked();
@@ -72,6 +74,7 @@ export component MediaBrowser inherits Rectangle {
     in property <string> offset-text;
     in property <bool> has-next;
     in property <bool> has-previous;
+    in property <bool> editing-occurrence;
     callback refresh();
     callback open(int);
     callback breadcrumb(int);
@@ -79,6 +82,8 @@ export component MediaBrowser inherits Rectangle {
     callback play(int);
     callback enqueue(int);
     callback cancel();
+    callback audio-options(int);
+    callback queue-choices();
 
     VerticalLayout {
         padding-top: 4px;
@@ -106,6 +111,11 @@ export component MediaBrowser inherits Rectangle {
 
         HorizontalLayout {
             spacing: 8px;
+            MediaButton {
+                label: "Queue audio choices";
+                enabled: !root.loading && !root.busy;
+                clicked => { root.queue-choices(); }
+            }
             MediaButton {
                 label: "Previous";
                 enabled: root.has-previous && !root.loading && !root.busy;
@@ -195,21 +205,26 @@ export component MediaBrowser inherits Rectangle {
                         min-width: 0px;
                         wrap: word-wrap;
                     }
-                    if item.is-container || item.playable : HorizontalLayout {
+                    if item.is-container || item.playable || item.is-audio-option || item.is-occurrence : HorizontalLayout {
                         spacing: 8px;
                         if item.is-container : MediaButton {
                             label: "Open";
                             enabled: !root.busy;
                             clicked => { root.open(index); }
                         }
-                        if !item.is-container && item.playable : MediaButton {
+                        if !item.is-container && item.playable && !item.is-audio-option && !item.is-occurrence : MediaButton {
                             label: "Play";
                             enabled: !root.busy;
                             clicked => { root.play(index); }
                         }
-                        MediaButton {
-                            label: "Add to queue";
-                            enabled: !root.busy;
+                        if !item.is-container && !item.is-audio-option && (item.playable || item.is-occurrence) : MediaButton {
+                            label: item.is-occurrence ? "Edit audio choice" : "Audio options";
+                            enabled: !root.busy && item.playable;
+                            clicked => { root.audio-options(index); }
+                        }
+                        if item.is-container || item.is-audio-option : MediaButton {
+                            label: item.is-audio-option ? (root.editing-occurrence ? "Apply to this occurrence" : "Add this choice to queue") : "Add to queue";
+                            enabled: !root.busy && (item.is-container || item.playable);
                             clicked => { root.enqueue(index); }
                         }
                         Rectangle { horizontal-stretch: 1; }
