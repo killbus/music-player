@@ -1,11 +1,9 @@
 //! Player-thread adapter for account-bound audio. Resolution never uses the
 //! currently browsed provider, and no transient URL enters the engine queue.
-use crate::{managed::*, source_resolver::SourceResolver};
-use music_player_provider::{
-    emby_playback::{AudioSelection, ResolvedAudio},
-    ProviderError,
-};
+use crate::{managed::*, source_descriptor::SourceDescriptor, source_resolver::SourceResolver};
+use music_player_provider::ProviderError;
 use music_player_transport::{HttpReader, HttpRequest};
+use music_player_types::audio::AudioSelection;
 use music_player_types::source::{ResourceKind, SourceRef};
 use rockbox_playback::{Metadata, Player as Engine, StreamSession};
 use std::time::Duration;
@@ -18,7 +16,7 @@ struct Occurrence {
 }
 type Completion = (
     ResolveRequest<Occurrence>,
-    Result<ResolvedAudio, ProviderError>,
+    Result<SourceDescriptor, ProviderError>,
 );
 
 /// No URL, headers or session token. Offset is an output delivery estimate.
@@ -31,9 +29,9 @@ pub(crate) struct SourceCheckpoint {
     pub(crate) selection: AudioSelection,
 }
 
-pub(crate) struct SourcePlayback {
+pub(crate) struct SourcePlayback<S: SessionControl = StreamSession> {
     resolver: SourceResolver,
-    coordinator: Coordinator<Occurrence>,
+    coordinator: Coordinator<Occurrence, S>,
     occurrence: Option<Occurrence>,
     selection: AudioSelection,
     task: Option<JoinHandle<()>>,
@@ -55,6 +53,8 @@ impl SourcePlayback {
             error: None,
         }
     }
+}
+impl<S: SessionControl> SourcePlayback<S> {
     pub fn is_loaded(&self) -> bool {
         self.occurrence.is_some()
     }
@@ -215,7 +215,7 @@ impl SourcePlayback {
             let result = tokio::select! {
                 biased;
                 _ = request.cancelled() => return,
-                result = resolver.resolve(&request.key().source, &selection, offset) => result,
+                result = resolver.resolve_playback(&request.key().source, &selection, offset) => result,
             };
             // A full mailbox never accumulates unbounded resolved sessions.
             tokio::select! {
@@ -226,22 +226,7 @@ impl SourcePlayback {
         }));
     }
 
-    /// Called on the same thread as player commands. The transport is created
-    /// inside the acceptance callback, never before the ticket is validated.
-    pub fn poll(&mut self, engine: &Engine) {
-        self.poll_with(|http| {
-            let (reader, transport) = HttpReader::start(http)
-                .map_err(|_| "could not start audio transport".to_owned())?;
-            Ok(engine.play_stream(
-                Box::new(reader),
-                "mp3".into(),
-                Metadata::default(),
-                move || transport.cancel(),
-            ))
-        });
-    }
-
-    fn poll_with(&mut self, mut start: impl FnMut(HttpRequest) -> Result<StreamSession, String>) {
+    fn poll_with(&mut self, mut start: impl FnMut((HttpRequest, String)) -> Result<S, String>) {
         while let Ok((request, result)) = self.completed.try_recv() {
             match result {
                 Err(error) => {
@@ -250,24 +235,30 @@ impl SourcePlayback {
                     }
                 }
                 Ok(audio) => {
-                    let ResolvedAudio {
-                        url,
-                        headers,
-                        follow_redirects,
+                    let SourceDescriptor {
+                        request: http,
+                        format_ext,
+                        start: origin,
+                        requested_offset_ms,
                         pin,
                         lease,
-                        ..
                     } = audio;
-                    let mut http = HttpRequest::new(url.into());
-                    http.headers = headers;
-                    http.follow_redirects = follow_redirects;
+                    // The requested target must match this attempt; a calibrated
+                    // actual start is separate evidence and may legitimately differ.
+                    if Duration::from_millis(requested_offset_ms) != request.target() {
+                        if self.coordinator.resolve_failed(&request) == ResolveOutcome::Failed {
+                            self.error =
+                                Some("resolved source target does not match the request".into());
+                        }
+                        continue;
+                    }
                     let mut start_error = None;
                     let outcome = self.coordinator.resolved(
                         &request,
                         Resolved {
-                            payload: http,
-                            start: StartPosition::RequestedOnly,
-                            lease: PlaybackLease::new(move || drop(lease)),
+                            payload: (http, format_ext),
+                            start: origin,
+                            lease,
                         },
                         |http| {
                             start(http).map_err(|error| {
@@ -283,7 +274,9 @@ impl SourcePlayback {
                             .as_ref()
                             .is_some_and(|o| o.id == request.key().id)
                         {
-                            self.selection = AudioSelection::Pinned(pin);
+                            if let Some(pin) = pin {
+                                self.selection = AudioSelection::Pinned(pin);
+                            }
                         }
                     } else if outcome == ResolveOutcome::Failed {
                         self.error = start_error;
@@ -294,7 +287,23 @@ impl SourcePlayback {
         self.coordinator.observe();
     }
 }
-impl Drop for SourcePlayback {
+impl SourcePlayback {
+    /// Called on the same thread as player commands. The transport is created
+    /// inside the acceptance callback, never before the ticket is validated.
+    pub fn poll(&mut self, engine: &Engine) {
+        self.poll_with(|(http, format_ext)| {
+            let (reader, transport) = HttpReader::start(http)
+                .map_err(|_| "could not start audio transport".to_owned())?;
+            Ok(engine.play_stream(
+                Box::new(reader),
+                format_ext,
+                Metadata::default(),
+                move || transport.cancel(),
+            ))
+        });
+    }
+}
+impl<S: SessionControl> Drop for SourcePlayback<S> {
     fn drop(&mut self) {
         self.stop();
     }

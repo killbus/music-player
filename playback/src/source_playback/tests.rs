@@ -1,6 +1,6 @@
 use super::*;
-use music_player_provider::emby_playback::AudioPin;
 use music_player_storage::Database;
+use music_player_types::audio::AudioPin;
 use music_player_types::source::RemoteIdentity;
 
 async fn playback() -> SourcePlayback {
@@ -130,4 +130,265 @@ async fn repeated_item_is_a_new_occurrence_and_old_error_does_not_replace_it() {
     player.poll_with(|_| panic!("error completion attempted to open a stream"));
     assert_eq!(player.snapshot().phase, Phase::Failed);
     assert_eq!(player.error(), Some("current failure"));
+}
+
+// Exercises the real mailbox/coordinator bridge, not decoding or listening.
+// The unchanged HTTP -> PCM fixture remains the native engine evidence.
+struct BridgeSession;
+impl SessionControl for BridgeSession {
+    fn cancel(&self) {}
+    fn output(&self) -> rockbox_playback::StreamOutputSnapshot {
+        rockbox_playback::StreamOutputSnapshot {
+            generation: 7,
+            boundary: rockbox_playback::StreamOutputBoundary::ByteStream,
+            frames: 44100,
+            sample_rate: 44100,
+        }
+    }
+    fn phase(&self) -> rockbox_playback::StreamPhase {
+        rockbox_playback::StreamPhase::Opening
+    }
+    fn generation(&self) -> u64 {
+        7
+    }
+    fn input_released(&self) -> bool {
+        false
+    }
+}
+
+async fn bridge_player() -> SourcePlayback<BridgeSession> {
+    let resolver = playback().await.resolver.clone();
+    let (sender, completed) = mpsc::channel(1);
+    SourcePlayback {
+        resolver,
+        coordinator: Coordinator::default(),
+        occurrence: None,
+        selection: AudioSelection::Auto,
+        task: None,
+        completed,
+        sender,
+        error: None,
+    }
+}
+
+fn bridge_descriptor(
+    pin: Option<&str>,
+    released: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) -> SourceDescriptor {
+    let mut request = HttpRequest::new("http://127.0.0.1:1/synthetic".into());
+    request
+        .headers
+        .insert("x-fixture", "synthetic-token".parse().unwrap());
+    request.follow_redirects = false;
+    request.header_timeout = Duration::from_secs(3);
+    SourceDescriptor {
+        request,
+        format_ext: "flac".into(),
+        requested_offset_ms: 1200,
+        start: StartPosition::Calibrated {
+            offset: Duration::from_millis(1100),
+            max_error: Duration::from_millis(5),
+        },
+        pin: pin.map(|id| AudioPin {
+            media_source_id: id.into(),
+            audio_stream_index: 0,
+            runtime_ticks: None,
+            etag: None,
+            codec: None,
+            channels: None,
+            sample_rate: None,
+        }),
+        lease: PlaybackLease::new(move || {
+            released.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }),
+    }
+}
+
+#[tokio::test]
+async fn bridge_releases_stale_and_duplicate_descriptors_and_pins_only_current_occurrence() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    let mut player = bridge_player().await;
+    let target = Duration::from_millis(1200);
+    player.load(source("same-item"), target, false).unwrap();
+    let old = player.coordinator.play().unwrap();
+    player.load(source("same-item"), target, false).unwrap();
+    let current = player.coordinator.play().unwrap();
+    assert_ne!(old.key().id, current.key().id);
+    let stale_released = Arc::new(AtomicUsize::new(0));
+    assert!(player
+        .sender
+        .try_send((
+            old,
+            Ok(bridge_descriptor(Some("old"), stale_released.clone()))
+        ))
+        .is_ok());
+    player.poll_with(|_| panic!("stale descriptor started a session"));
+    assert_eq!(stale_released.load(Ordering::SeqCst), 1);
+    assert!(player.accepted_pin().is_none());
+
+    let active_released = Arc::new(AtomicUsize::new(0));
+    assert!(player
+        .sender
+        .try_send((
+            current.clone(),
+            Ok(bridge_descriptor(Some("current"), active_released.clone()))
+        ))
+        .is_ok());
+    let mut starts = 0;
+    player.poll_with(|(http, format_ext)| {
+        starts += 1;
+        assert_eq!(format_ext, "flac");
+        assert_eq!(http.url, "http://127.0.0.1:1/synthetic");
+        assert_eq!(http.headers["x-fixture"], "synthetic-token");
+        assert!(!http.follow_redirects);
+        assert_eq!(http.header_timeout, Duration::from_secs(3));
+        Ok(BridgeSession)
+    });
+    assert_eq!(starts, 1);
+    let (id, pin) = player.accepted_pin().unwrap();
+    assert_eq!(id, current.key().id);
+    assert_eq!(pin.media_source_id, "current");
+    assert_eq!(pin.audio_stream_index, 0);
+    let position = player.snapshot().position.unwrap();
+    assert_eq!(position.requested_start, target);
+    assert_eq!(
+        position.start,
+        StartPosition::Calibrated {
+            offset: Duration::from_millis(1100),
+            max_error: Duration::from_millis(5),
+        }
+    );
+    assert_eq!(position.absolute, Duration::from_millis(2100));
+    assert_eq!(active_released.load(Ordering::SeqCst), 0);
+
+    let duplicate_released = Arc::new(AtomicUsize::new(0));
+    assert!(player
+        .sender
+        .try_send((
+            current,
+            Ok(bridge_descriptor(
+                Some("duplicate"),
+                duplicate_released.clone()
+            ))
+        ))
+        .is_ok());
+    player.poll_with(|_| panic!("duplicate descriptor started a session"));
+    assert_eq!(duplicate_released.load(Ordering::SeqCst), 1);
+    assert_eq!(player.accepted_pin().unwrap().1.media_source_id, "current");
+    player.stop();
+    assert_eq!(active_released.load(Ordering::SeqCst), 1);
+    drop(player);
+    assert_eq!(active_released.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn bridge_rejects_mismatched_target_and_does_not_invent_an_optional_pin() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    let mut player = bridge_player().await;
+    player
+        .load(source("old-item"), Duration::from_millis(500), false)
+        .unwrap();
+    let stale = player.coordinator.play().unwrap();
+    player
+        .load(source("item"), Duration::from_millis(999), false)
+        .unwrap();
+    let request = player.coordinator.play().unwrap();
+    let released = Arc::new(AtomicUsize::new(0));
+    assert!(player
+        .sender
+        .try_send((request, Ok(bridge_descriptor(None, released.clone()))))
+        .is_ok());
+    player.poll_with(|_| panic!("mismatched target started a session"));
+    assert_eq!(player.snapshot().phase, Phase::Failed);
+    assert!(player.error().is_some());
+    assert_eq!(released.load(Ordering::SeqCst), 1);
+    let current_error = player.error().unwrap().to_owned();
+    let stale_released = Arc::new(AtomicUsize::new(0));
+    assert!(player
+        .sender
+        .try_send((
+            stale,
+            Ok(bridge_descriptor(Some("stale"), stale_released.clone()))
+        ))
+        .is_ok());
+    player.poll_with(|_| panic!("stale mismatched descriptor started a session"));
+    assert_eq!(stale_released.load(Ordering::SeqCst), 1);
+    assert_eq!(player.error(), Some(current_error.as_str()));
+    assert_eq!(player.snapshot().phase, Phase::Failed);
+    assert!(player.accepted_pin().is_none());
+    assert_eq!(player.selection, AudioSelection::Auto);
+
+    player
+        .load(source("item"), Duration::from_millis(1200), false)
+        .unwrap();
+    let request = player.coordinator.play().unwrap();
+    assert!(player
+        .sender
+        .try_send((request, Ok(bridge_descriptor(None, released.clone()))))
+        .is_ok());
+    player.poll_with(|_| Ok(BridgeSession));
+    assert_eq!(player.snapshot().phase, Phase::Streaming);
+    assert!(player.accepted_pin().is_none());
+    assert_eq!(player.checkpoint().unwrap().selection, AudioSelection::Auto);
+    player.stop();
+    assert_eq!(released.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn bridge_open_failure_releases_once_and_preserves_requested_selection() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    let mut player = bridge_player().await;
+    let selection = AudioSelection::Explicit {
+        media_source_id: "requested-version".into(),
+        audio_stream_index: 0,
+    };
+    let occurrence_id = uuid::Uuid::new_v4().to_string();
+    player
+        .load_occurrence(
+            source("item"),
+            occurrence_id.clone(),
+            selection.clone(),
+            Duration::from_millis(1200),
+            false,
+        )
+        .unwrap();
+    let request = player.coordinator.play().unwrap();
+    let released = Arc::new(AtomicUsize::new(0));
+    assert!(player
+        .sender
+        .try_send((
+            request,
+            Ok(bridge_descriptor(Some("failed-result"), released.clone(),))
+        ))
+        .is_ok());
+
+    let mut starts = 0;
+    player.poll_with(|_| {
+        starts += 1;
+        Err("synthetic stream open failure".into())
+    });
+    assert_eq!(starts, 1);
+    assert_eq!(released.load(Ordering::SeqCst), 1);
+    assert_eq!(player.snapshot().phase, Phase::Failed);
+    assert_eq!(player.error(), Some("synthetic stream open failure"));
+    assert!(player.snapshot().generation.is_none());
+    assert!(player.accepted_pin().is_none());
+    let checkpoint = player.checkpoint().unwrap();
+    assert_eq!(checkpoint.occurrence_id, occurrence_id);
+    assert_eq!(checkpoint.selection, selection);
+
+    player.stop();
+    assert_eq!(released.load(Ordering::SeqCst), 1);
+    assert_eq!(player.checkpoint().unwrap().selection, selection);
+    drop(player);
+    assert_eq!(released.load(Ordering::SeqCst), 1);
 }

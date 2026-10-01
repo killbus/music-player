@@ -1,6 +1,7 @@
 //! Resolve queued sources by their saved account, independent of library browsing.
 //! Each operation authenticates a fresh snapshot; no client or credentials are cached.
 
+use crate::source_descriptor::SourceDescriptor;
 use music_player_provider::{
     backends::emby::Emby,
     emby_playback::{AudioSelection, ResolvedAudio},
@@ -52,11 +53,27 @@ impl SourceResolver {
         .map_err(|_| failure("saved source resolution timed out"))?
     }
 
+    /// Internal playback dispatch boundary. Only native Emby is supported today;
+    /// extension negotiation and resolution are not wired here yet.
+    pub(crate) async fn resolve_playback(
+        &self,
+        source: &SourceRef,
+        selection: &AudioSelection,
+        offset_ms: u64,
+    ) -> Result<SourceDescriptor, ProviderError> {
+        self.resolve(source, selection, offset_ms)
+            .await
+            .map(SourceDescriptor::from)
+    }
+
     /// Read selectable metadata through the source's saved account. Browsing
     /// another server never changes this lookup, and no playback lease is opened.
     pub async fn audio_options(&self, source: &SourceRef) -> Result<AudioOptions, ProviderError> {
         tokio::time::timeout(RESOLVE_TIMEOUT, async {
-            self.authenticated(source).await?.audio_options(source).await
+            self.authenticated(source)
+                .await?
+                .audio_options(source)
+                .await
         })
         .await
         .map_err(|_| failure("saved source audio options lookup timed out"))?
