@@ -88,7 +88,7 @@ souvlaki = {version = "0.8", default-features = false, features = ["use_zbus"]}
 [build-dependencies]
 tonic-prost-build = "0.14"
 
-[dev-dependencies.music-player-migration]
+[dependencies.music-player-migration]
 path = "../migration"
 version = "0.4.5"
 

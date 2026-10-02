@@ -22,6 +22,9 @@ pub mod scrobbler;
 pub mod server;
 pub mod servers;
 pub mod tracklist;
+/// Bounded gRPC metadata budget for complete media libraries and queues.
+pub const LIBRARY_MESSAGE_LIMIT: usize = 64 * 1024 * 1024;
+
 pub mod api {
     #[path = ""]
     pub mod music {

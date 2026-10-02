@@ -99,7 +99,7 @@ fn boot() {
     // The engine handle is not Send — Player::new parks it on its own
     // dedicated current-thread runtime internally.
     let broadcast_peers = Arc::clone(&peer_map);
-    let (_player, _) = Player::new(
+    let (_player, _) = Player::with_source_resolver(
         move |event| match event {
             PlayerEvent::CurrentTrack {
                 track,
@@ -139,6 +139,7 @@ fn boot() {
         Arc::clone(&cmd_tx),
         cmd_rx,
         Arc::clone(&tracklist),
+        music_player_playback::source_resolver::SourceResolver::from_settings(db.clone()),
     );
 
     // Library scan: initial (only when the library is empty) + periodic.

@@ -54,6 +54,8 @@ const PAGE: i32 = 500;
 
 #[derive(Debug)]
 pub enum Cmd {
+    Media(crate::media::Request),
+    MediaCommit(crate::media::Commit),
     Play,
     Pause,
     Next,
@@ -509,7 +511,8 @@ async fn session(
     load_playlists(channel, weak).await;
 
     // Poll now-playing + queue until the daemon (or the target) goes away.
-    let mut tracklist = TracklistServiceClient::new(channel.clone());
+    let mut tracklist = TracklistServiceClient::new(channel.clone())
+        .max_decoding_message_size(music_player_server::LIBRARY_MESSAGE_LIMIT);
     let mut last_art: Option<String> = None;
     // The waveform is a property of the track, so it is fetched when the
     // track changes rather than on every poll — plus spaced retries while it
@@ -1574,7 +1577,8 @@ async fn load_tracks(
     if tracks.is_empty() {
         return Ok(());
     }
-    let mut tracklist = TracklistServiceClient::new(channel.clone());
+    let mut tracklist = TracklistServiceClient::new(channel.clone())
+        .max_decoding_message_size(music_player_server::LIBRARY_MESSAGE_LIMIT);
     tracklist
         .load_tracks(LoadTracksRequest {
             tracks,
@@ -2522,18 +2526,73 @@ async fn fetch_radio_logo(weak: Weak<AppWindow>, id: String, url: String) {
     });
 }
 
+// Run before any control awaits. The ticket shares the same atomic boundary
+// as media preflight, so only an as-yet-unsent mutation can be superseded.
+pub(crate) fn supersede_pending_media(
+    cmd: &Cmd,
+    pending: &mut Option<crate::media::Ticket>,
+) -> Option<crate::media::Ticket> {
+    if matches!(
+        cmd,
+        Cmd::Play
+            | Cmd::Pause
+            | Cmd::Next
+            | Cmd::Previous
+            | Cmd::SeekMs(_)
+            | Cmd::PlayAlbum(_)
+            | Cmd::PlayAlbumAt(..)
+            | Cmd::PlayAlbumShuffled(_)
+            | Cmd::PlayArtist(_)
+            | Cmd::PlayArtistAt(..)
+            | Cmd::PlayArtistShuffled(_)
+            | Cmd::PlayAllAt(_)
+            | Cmd::PlayLikedAt(_)
+            | Cmd::PlayLikedShuffled
+            | Cmd::QueueJump(_)
+            | Cmd::QueueClear
+            | Cmd::QueueRemove(_)
+            | Cmd::PlaySavedPlaylist(_)
+            | Cmd::ShufflePlaylist(_)
+            | Cmd::RadioPlay(_)
+            | Cmd::ActivateRenderer(..)
+    ) {
+        return pending.take().filter(|ticket| ticket.cancel_pending());
+    }
+    None
+}
+
 async fn cmd_loop(
     mut rx: UnboundedReceiver<Cmd>,
     state: Arc<Mutex<WorkerState>>,
     weak: Weak<AppWindow>,
 ) {
+    let mut pending_media = None;
     while let Some(cmd) = rx.recv().await {
+        if let Some(ticket) = supersede_pending_media(&cmd, &mut pending_media) {
+            crate::media::show_superseded(&weak, ticket);
+        }
         let channel = chan();
         let mut playback = PlaybackServiceClient::new(channel.clone());
         let mut mixer = MixerServiceClient::new(channel.clone());
-        let mut tracklist = TracklistServiceClient::new(channel.clone());
+        let mut tracklist = TracklistServiceClient::new(channel.clone())
+            .max_decoding_message_size(music_player_server::LIBRARY_MESSAGE_LIMIT);
         let res: Result<(), tonic::Status> = async {
             match cmd {
+                Cmd::Media(request) => {
+                    if let Some(ticket) = request.mutation_ticket() {
+                        pending_media = Some(ticket);
+                    }
+                    tokio::spawn(crate::media::run(channel.clone(), weak.clone(), request));
+                }
+                Cmd::MediaCommit(request) => {
+                    pending_media = Some(request.ticket());
+                    // Capture this daemon channel; only the bounded media wait
+                    // leaves the serial worker. Later controls may overtake its
+                    // acknowledgement; later controls cancel Pending above.
+                    // commit retains the atomic
+                    // Pending -> Submitted boundary; sent work is not revoked.
+                    tokio::spawn(crate::media::commit(channel.clone(), weak.clone(), request));
+                }
                 Cmd::Play => {
                     playback.play(PlayRequest {}).await?;
                     state.lock().await.playing = true;
@@ -3259,7 +3318,8 @@ async fn insert_track_ids(
     position: i32,
     ids: Vec<String>,
 ) -> Result<(), tonic::Status> {
-    let mut tracklist = TracklistServiceClient::new(channel.clone());
+    let mut tracklist = TracklistServiceClient::new(channel.clone())
+        .max_decoding_message_size(music_player_server::LIBRARY_MESSAGE_LIMIT);
     match position {
         -2 => {
             // PlayNext inserts right after the current track, so pushing in

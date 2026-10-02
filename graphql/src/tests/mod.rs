@@ -17,6 +17,7 @@ use crate::{
 };
 
 pub mod library;
+mod media;
 pub mod objects;
 pub mod playback;
 pub mod playlist;
