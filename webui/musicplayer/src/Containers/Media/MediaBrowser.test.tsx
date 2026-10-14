@@ -103,7 +103,7 @@ describe("media libraries", () => {
         queued(variables);
         return HttpResponse.json({ data: { addTracks: true } });
       }),
-      graphql.mutation("PlayNext", ({ variables }) => {
+      graphql.mutation("PlayTrack", ({ variables }) => {
         leafRequests(variables);
         return HttpResponse.json({ errors: [{ message: "Receiver cannot play this source" }] });
       }),
