@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Publish already-tested files/images without rebuilding or overwriting."""
-import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
+
+from release_checksums import validate_local_files, verify_uploaded_files
 
 
 def run(*args, **kwargs):
@@ -24,17 +25,9 @@ def main():
     tag, version, image = (os.environ[key] for key in ('RELEASE_TAG', 'RELEASE_VERSION', 'IMAGE'))
     out = Path('dist/build/release')
     files = sorted(out.iterdir())
-    for checksum in out.glob('*.sha256'):
-        expected, name = checksum.read_text().strip().split(maxsplit=1)
-        name = name.lstrip('*')
-        if Path(name).name != name:
-            raise SystemExit(f'nonportable checksum: {checksum}')
-        actual = hashlib.sha256((out / name).read_bytes()).hexdigest()
-        if actual != expected:
-            raise SystemExit(f'checksum mismatch: {name}')
-    if not files or any(not (out / (p.name + '.sha256')).is_file()
-                        for p in files if p.suffix != '.sha256'):
-        raise SystemExit('missing release files/checksums')
+    if not files:
+        raise SystemExit('missing release files')
+    validate_local_files(files)
     release = json.loads(run('gh', 'release', 'view', tag, '--json', 'assets'))
     existing = {asset['name'] for asset in release['assets']}
     collision = existing.intersection(p.name for p in files)
@@ -69,6 +62,7 @@ def main():
             raise SystemExit(f'unexpected manifest platforms: {platforms}')
         # gh release upload without --clobber refuses overwrites as well.
         subprocess.run(['gh', 'release', 'upload', tag, *(str(p) for p in files)], check=True)
+        verify_uploaded_files(tag, files)
     finally:
         subprocess.run(['docker', 'logout', 'ghcr.io'], check=False)
 

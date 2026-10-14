@@ -11,6 +11,8 @@ import sys
 import tempfile
 import tomllib
 
+from release_checksums import validate_asset_names, validate_local_files, verify_uploaded_files
+
 
 def gh(*args):
     return subprocess.check_output(["gh", *args], text=True).strip()
@@ -40,35 +42,49 @@ def main():
         raise SystemExit("Publication is not enabled")
     assets = {asset["name"] for asset in release(tag)["assets"]}
     existing = frozenset(assets)
+    files = []
     for pattern in sys.argv[2:]:
         paths = sorted(glob.glob(pattern))
         if not paths:
             raise SystemExit(f"No files matched {pattern}")
-        for filename in paths:
-            name = Path(filename).name
-            # A newly built checksum must never describe an older preserved archive.
-            if name.endswith(".sha256") and name.removesuffix(".sha256") in existing:
-                if name not in assets:
-                    archive = name.removesuffix(".sha256")
-                    with tempfile.TemporaryDirectory() as directory:
-                        subprocess.run(["gh", "release", "download", tag,
-                                        "--pattern", archive, "--dir", directory], check=True)
-                        with (Path(directory) / archive).open("rb") as source:
-                            digest = hashlib.file_digest(source, "sha256").hexdigest()
-                        checksum = Path(directory) / name
-                        checksum.write_text(f"{digest}  {archive}\n", encoding="ascii", newline="\n")
-                        subprocess.run(["gh", "release", "upload", tag, str(checksum)], check=True)
-                        assets.add(name)
-                else:
-                    print(f"Preserving checksum for existing archive: {name}")
-                continue
-            if name not in existing and f"{name}.sha256" in existing:
-                raise SystemExit(f"Release has an orphan checksum for {name}; inspect it before recovery")
-            if name in assets:
-                print(f"Preserving existing asset: {name}")
-                continue
-            subprocess.run(["gh", "release", "upload", tag, filename], check=True)
-            assets.add(Path(filename).name)
+        files.extend(Path(filename) for filename in paths)
+    validate_asset_names(files)
+    for path in files:
+        if path.name not in existing and path.name + ".sha256" in existing:
+            raise SystemExit(f"Release has an orphan checksum for {path.name}; inspect it before recovery")
+    # Preserved archives may differ from this build. Their missing checksums
+    # are recovered from remote bytes below, never from the new local build.
+    validate_local_files([
+        path for path in files if path.name not in existing
+        and not (path.name.endswith(".sha256") and path.name.removesuffix(".sha256") in existing)
+    ])
+    uploaded = []
+    for path in files:
+        name = path.name
+        if name.endswith(".sha256") and name.removesuffix(".sha256") in existing:
+            if name not in assets:
+                archive = name.removesuffix(".sha256")
+                with tempfile.TemporaryDirectory() as directory:
+                    subprocess.run(["gh", "release", "download", tag,
+                                    "--pattern", archive, "--dir", directory], check=True)
+                    with (Path(directory) / archive).open("rb") as source:
+                        digest = hashlib.file_digest(source, "sha256").hexdigest()
+                    checksum = Path(directory) / name
+                    checksum.write_text(f"{digest}  {archive}\n", encoding="ascii", newline="\n")
+                    subprocess.run(["gh", "release", "upload", tag, str(checksum)], check=True)
+                    verify_uploaded_files(tag, [checksum])
+                    assets.add(name)
+            else:
+                print(f"Preserving checksum for existing archive: {name}")
+            continue
+        if name in assets:
+            print(f"Preserving existing asset: {name}")
+            continue
+        subprocess.run(["gh", "release", "upload", tag, str(path)], check=True)
+        uploaded.append(path)
+        assets.add(name)
+    if uploaded:
+        verify_uploaded_files(tag, uploaded)
 
 
 if __name__ == "__main__":

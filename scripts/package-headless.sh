@@ -24,6 +24,8 @@ rpm=(dist/music-player-cli-*.rpm)
 package_version=${RELEASE_VERSION//-/\~}
 [[ $(dpkg-deb -f "${deb[0]}" Version) == "$package_version" ]]
 [[ $(rpm -qp --qf '%{VERSION}' "${rpm[0]}") == "$package_version" ]]
+rpm_arch=$(rpm -qp --qf '%{ARCH}' "${rpm[0]}")
+[[ $(basename "${rpm[0]}") == "music-player-cli-${RELEASE_VERSION}-1.${rpm_arch}.rpm" ]]
 if [[ "$RELEASE_VERSION" == *-* ]]; then
   dpkg --compare-versions "$package_version" lt "${RELEASE_VERSION%%-*}"
 fi
@@ -57,3 +59,4 @@ output.write_text(json.dumps(metadata, indent=2) + '\n')
 PY
 cp "$evidence/"*.txt "$out/"
 (cd "$out" && for file in *; do sha256sum "$file" > "$file.sha256"; done)
+python3 scripts/release_checksums.py "$out"

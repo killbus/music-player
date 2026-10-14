@@ -116,7 +116,13 @@ build_rpm() {
     "$script_dir/$rpm_template" > "$rpm_top/SPECS/music-player.spec"
   rpmbuild --define "_topdir $rpm_top" --target "$rpm_arch" \
     -bb "$rpm_top/SPECS/music-player.spec"
-  find "$rpm_top/RPMS" -type f -name '*.rpm' -exec mv -f {} "$script_dir/" \;
+  # GitHub rewrites ~ in asset names. Keep it in RPM metadata only, and name
+  # the download before generating checksums so their targets survive upload.
+  while IFS= read -r -d '' package; do
+    local filename
+    filename=$(basename "$package")
+    mv "$package" "$script_dir/${filename//\~/-}"
+  done < <(find "$rpm_top/RPMS" -type f -name '*.rpm' -print0)
 }
 
 case "$format" in

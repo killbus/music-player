@@ -34,6 +34,12 @@ conflicts with the existing combined `music-player` package, which owns the same
 executable. Remove the combined package before switching. Its desktop build and
 four-argument `dist/package-linux.sh` interface remain available.
 
+Prerelease package metadata uses `~` (for example `0.4.6~rc.1`) so it sorts
+before the final version. Download filenames use `-` instead: GitHub rewrites
+`~` in asset names, which would invalidate checksum targets. Checksums are
+generated after naming the downloads. Publishers validate local pairs before
+upload and verify the exact uploaded names and GitHub SHA-256 digests afterward.
+
 RPM and archives run the CLI directly. The **CLI DEB also includes a systemd
 unit**, without requiring systemd as the container's init process.
 
