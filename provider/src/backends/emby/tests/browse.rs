@@ -37,7 +37,7 @@ fn assert_listing(request: &Request, parent: &str, recursive: bool, start: usize
         ("StartIndex".into(), start.to_string()),
         ("Limit".into(), limit.to_string()),
         ("EnableTotalRecordCount".into(), "true".into()),
-        ("SortBy".into(), "SortName,Id".into()),
+        ("SortBy".into(), "SortName".into()),
     ]);
     if recursive {
         expected.insert("MediaTypes".into(), "Audio,Video".into());
@@ -240,6 +240,76 @@ async fn recursive_queue_lists_beyond_500_without_playback_info_or_container_tra
             assert_eq!(track.id, track.uri);
         }
         fixture.idle(6).await;
+    }).await;
+}
+
+#[tokio::test]
+async fn season_browse_and_queue_use_supported_sort_without_losing_same_name_items() {
+    bounded(async {
+        let fixture = Fixture::new().await;
+        let client = authenticate(&fixture, false, true).await;
+        let parent = client
+            .reference(ResourceKind::Container, "season")
+            .unwrap()
+            .to_handle();
+        for recursive in [false, true] {
+            let (result, ()) = tokio::join!(
+                async {
+                    if recursive {
+                        client.container_tracks(&parent, Page::all()).await
+                            .map(|tracks| tracks.into_iter().map(|track| track.id).collect::<Vec<_>>())
+                    } else {
+                        client.browse(Some(&parent), Page::all()).await
+                            .map(|entries| entries.into_iter().map(|entry| entry.id).collect::<Vec<_>>())
+                    }
+                },
+                async {
+                    for cursor in [0, 1] {
+                        let request = fixture.json("GET", LIST_PATH, json!({
+                            "Items":[{"Id":format!("episode-{cursor}"), "Name":"Same title",
+                                "Type":"Episode", "MediaType":"Video", "IsFolder":false}],
+                            "StartIndex":cursor, "TotalRecordCount":2
+                        })).await;
+                        // Root views can work while season queries reject SortName,Id.
+                        assert_listing(&request, "season", recursive, cursor, 500);
+                    }
+                }
+            );
+            let handles = result.unwrap();
+            assert_eq!(handles.len(), 2);
+            for (index, handle) in handles.iter().enumerate() {
+                let source = SourceRef::parse(handle).unwrap();
+                assert_eq!(source.item_id, format!("episode-{index}"));
+                assert_eq!(source.kind, ResourceKind::Item);
+                assert_eq!(source.account_id, ACCOUNT);
+                assert_eq!(source.remote, *client.identity());
+            }
+        }
+        fixture.idle(5).await;
+    }).await;
+}
+
+#[tokio::test]
+async fn recursive_queue_rejects_later_http_error_without_returning_partial_tracks() {
+    bounded(async {
+        let fixture = Fixture::new().await;
+        let client = authenticate(&fixture, false, true).await;
+        let parent = client
+            .reference(ResourceKind::Container, "season")
+            .unwrap()
+            .to_handle();
+        let (result, ()) = tokio::join!(client.container_tracks(&parent, Page::all()), async {
+            let first = fixture.json("GET", LIST_PATH, json!({
+                "Items":[{"Id":"episode", "Name":"Episode", "Type":"Episode", "MediaType":"Video"}],
+                "StartIndex":0, "TotalRecordCount":2
+            })).await;
+            assert_listing(&first, "season", true, 0, 500);
+            let failed = fixture.reply("GET", LIST_PATH, 500, None, b"{}").await;
+            assert_listing(&failed, "season", true, 1, 500);
+        });
+        assert!(matches!(result, Err(ProviderError::Other(message))
+            if message == "Emby answered HTTP 500"));
+        fixture.idle(3).await;
     }).await;
 }
 
