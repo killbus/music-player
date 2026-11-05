@@ -1,6 +1,7 @@
 //! Host-owned streaming sessions. Cancellation is independent of the engine queue.
 use crate::Metadata;
 use std::io::{self, Read};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -67,6 +68,7 @@ impl StreamOutputSnapshot {
 struct Inner {
     state: Mutex<StreamSnapshot>,
     output: Mutex<StreamOutputSnapshot>,
+    queued_frames: AtomicU64,
     wake: Box<dyn Fn() + Send + Sync>,
     // Only explicit cancellation revokes output. Normal reader EOF/drop
     // must allow already decoded PCM to drain.
@@ -81,6 +83,30 @@ impl StreamSession {
     }
     pub fn output_snapshot(&self) -> StreamOutputSnapshot {
         *self.0.output.lock().unwrap()
+    }
+    /// Operational stream end, not proof that the source was complete or heard.
+    /// Counting queued vs accepted frames includes a writer's pending tail;
+    /// an empty ring alone can race a partial/backpressured final write.
+    pub fn clean_end(&self) -> bool {
+        let state = self.0.state.lock().unwrap();
+        if state.cancel_requested
+            || state.phase != StreamPhase::EndUnconfirmed
+            || state.read_end != StreamReadEnd::Eof
+            || state.decoder_status != Some(0)
+            || !state.reader_released
+            || !state.decoder_joined
+        {
+            return false;
+        }
+        let output = self.output_snapshot();
+        output.boundary != StreamOutputBoundary::Unavailable
+            && output.frames > 0
+            && output.frames == self.0.queued_frames.load(Ordering::Acquire)
+    }
+    pub(crate) fn record_queued_output(&self, frames: usize) {
+        self.0
+            .queued_frames
+            .fetch_add(frames as u64, Ordering::Release);
     }
     pub(crate) fn configure_output(&self, sample_rate: u32, boundary: StreamOutputBoundary) {
         let mut output = self.0.output.lock().unwrap();
@@ -164,6 +190,7 @@ impl StreamInput {
                 frames: 0,
                 sample_rate: 0,
             }),
+            queued_frames: AtomicU64::new(0),
             wake: Box::new(wake),
             revoke_output: Box::new(revoke_output),
         }));
@@ -389,5 +416,54 @@ mod tests {
         assert_eq!(snapshot.phase, StreamPhase::Failed);
         assert!(snapshot.reader_released && snapshot.decoder_joined);
         assert!(!snapshot.cancel_requested);
+    }
+
+    #[test]
+    fn clean_end_waits_for_pending_output_and_is_revoked_by_cancel() {
+        let (mut input, _) = input(false);
+        let session = input.session.clone();
+        session.configure_output(44100, StreamOutputBoundary::ByteStream);
+        session.record_queued_output(100);
+        session.record_output(99);
+        assert_eq!(input.reader.read(&mut [0; 1]).unwrap(), 0);
+        session.decoder_ended(Some(0));
+        session.decoder_joined();
+        assert!(!session.clean_end(), "reader is still owned");
+        drop(input);
+        assert!(!session.clean_end(), "pending final frame is not delivered");
+        session.record_output(1);
+        assert!(session.clean_end());
+        assert_eq!(session.snapshot().phase, StreamPhase::EndUnconfirmed);
+        session.cancel();
+        assert!(!session.clean_end());
+    }
+
+    #[test]
+    fn clean_end_requires_eof_success_and_observable_nonempty_output() {
+        for case in 0..6 {
+            let (mut input, _) = input(case == 0);
+            let session = input.session.clone();
+            session.configure_output(
+                44100,
+                if case == 4 {
+                    StreamOutputBoundary::Unavailable
+                } else {
+                    StreamOutputBoundary::DeviceBuffer
+                },
+            );
+            if case != 5 {
+                session.record_queued_output(1);
+                session.record_output(1);
+            }
+            if case != 1 {
+                let _ = input.reader.read(&mut [0; 1]);
+            }
+            session.decoder_ended(Some(if case == 2 { 1 } else { 0 }));
+            if case != 3 {
+                session.decoder_joined();
+            }
+            drop(input);
+            assert!(!session.clean_end(), "negative case {case}");
+        }
     }
 }
