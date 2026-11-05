@@ -297,8 +297,9 @@ async fn managed_queue_does_not_skip_short_clean_eof_transport_failure_or_http_e
 #[tokio::test]
 async fn managed_queue_manual_next_and_pause_cannot_trigger_stale_advance() {
     let mut f = Fixture::new(Response::Complete, 0).await;
-    f.until(|f| f.player.source_phase == Some(Phase::Streaming))
-        .await;
+    // The short fixture may reach decoder EOF before the first host tick;
+    // delivered PCM, not the transient phase, proves A actually started.
+    f.until(|f| f.player.position_ms > 0).await;
     f.player.handle_next();
     f.until(|f| f.requests.lock().unwrap().len() == 2).await;
     f.player.handle_pause();
