@@ -11,13 +11,16 @@ saturation. Remove this patch when an upstream release fixes the conversion.
 
 The M1b patch adds a host-owned forward-only reader API to Player. Each stream
 has its own generation and independent cancellation callback, reader release,
-codec status and codec join observations. Stream EOF is EndUnconfirmed and
-cannot trigger queue auto-advance; pause and replacement cancel the reader.
+codec status and codec join observations. Stream EOF remains EndUnconfirmed
+(not a content integrity witness); pause and replacement cancel the reader.
+`StreamSession::clean_end` separately reports clean reader/decoder EOF and
+complete output delivery, including pending writer frames. The daemon uses it
+with finite-interval timing guards for queue navigation, not listening statistics.
 The callback must wake blocked IO and reader destruction must join the host
 transport. Legacy URL handling remains on the upstream path.
 
-This is an experimental integration under tools/emby-runtime-probe. The daemon
-has not adopted it yet. FIFO and connected TCP/Unix writers now use nonblocking
+The daemon uses this API for managed sources; tools/emby-runtime-probe retains
+the isolated engine experiments. FIFO and connected TCP/Unix writers use nonblocking
 writes. Cancellation revokes unsent PCM under the same gate as each final write;
 partial frame cancellation is zero-padded before subsequent stereo frames.
 Normal reader EOF releases input without revoking buffered output. Direct libc

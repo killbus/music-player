@@ -9,6 +9,7 @@ struct FakeState {
     phase: StreamPhase,
     boundary: StreamOutputBoundary,
     input_released: bool,
+    clean_end: bool,
     events: Arc<Mutex<Vec<&'static str>>>,
 }
 impl FakeSession {
@@ -19,6 +20,7 @@ impl FakeSession {
             phase: StreamPhase::Opening,
             boundary: StreamOutputBoundary::ByteStream,
             input_released: false,
+            clean_end: false,
             events,
         })))
     }
@@ -52,9 +54,125 @@ impl SessionControl for FakeSession {
     fn input_released(&self) -> bool {
         self.0.lock().unwrap().input_released
     }
+    fn clean_end(&self) -> bool {
+        self.0.lock().unwrap().clean_end
+    }
 }
 
 type Control = Coordinator<&'static str, FakeSession>;
+fn ending_control(timeline: Timeline, start: Duration, frames: u64) -> (Control, FakeSession) {
+    let mut c = Control::default();
+    let request = c.load("episode", start, true).unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let s = FakeSession::new(1, events.clone());
+    assert_eq!(
+        c.resolved(
+            &request,
+            with_caps(events, caps(timeline, SeekPolicy::ServerOffset)),
+            |_| Ok::<_, ()>(s.clone())
+        ),
+        ResolveOutcome::Started
+    );
+    s.deliver(frames);
+    {
+        let mut state = s.0.lock().unwrap();
+        state.phase = StreamPhase::EndUnconfirmed;
+        state.input_released = true;
+        state.clean_end = true;
+    }
+    (c, s)
+}
+
+#[test]
+fn finite_end_requires_clean_drained_matching_interval_not_just_eof_or_duration() {
+    let finite = Timeline::Finite {
+        duration_ticks: 100_000_000,
+    };
+    for (timeline, start_ms, delivered_ms, clean, expected) in [
+        (finite, 0, 10_000, true, Phase::Ended),
+        (finite, 0, 10_000, false, Phase::EndUnconfirmed),
+        (finite, 0, 9_000, true, Phase::EndUnconfirmed),
+        (finite, 0, 11_000, true, Phase::EndUnconfirmed),
+        (finite, 8_000, 2_000, true, Phase::Ended),
+        (finite, 8_000, 1_000, true, Phase::EndUnconfirmed),
+        (finite, 9_990, 1, true, Phase::EndUnconfirmed),
+        (finite, 10_000, 100, true, Phase::EndUnconfirmed),
+        (Timeline::Unknown, 0, 10_000, true, Phase::EndUnconfirmed),
+        (Timeline::Live, 0, 10_000, true, Phase::EndUnconfirmed),
+        (
+            Timeline::Finite { duration_ticks: 0 },
+            0,
+            1,
+            true,
+            Phase::EndUnconfirmed,
+        ),
+    ] {
+        let (mut c, s) = ending_control(
+            timeline,
+            Duration::from_millis(start_ms),
+            delivered_ms * 44100 / 1000,
+        );
+        s.0.lock().unwrap().clean_end = clean;
+        c.observe();
+        assert_eq!(
+            c.snapshot().phase,
+            expected,
+            "{timeline:?} {start_ms} {delivered_ms} {clean}"
+        );
+    }
+}
+
+#[test]
+fn late_end_after_pause_stop_seek_or_replacement_does_not_override_intent() {
+    for command in 0..4 {
+        let (mut c, s) = ending_control(
+            Timeline::Finite {
+                duration_ticks: 20_000_000,
+            },
+            Duration::ZERO,
+            88200,
+        );
+        match command {
+            0 => c.pause(),
+            1 => c.stop(),
+            2 => {
+                c.seek(Duration::from_secs(1)).unwrap();
+            }
+            _ => {
+                c.load("other", Duration::ZERO, true);
+            }
+        }
+        let before = c.snapshot();
+        s.0.lock().unwrap().phase = StreamPhase::EndUnconfirmed;
+        c.observe();
+        assert_eq!(c.snapshot(), before);
+        assert_ne!(c.snapshot().phase, Phase::Ended);
+    }
+}
+
+#[test]
+fn end_timing_uses_calibrated_origin_and_caps_long_programme_tolerance() {
+    let finite = Timeline::Finite {
+        duration_ticks: 180_000_000_000,
+    };
+    for (delivered_seconds, expected) in [(18000, Phase::Ended), (17997, Phase::EndUnconfirmed)] {
+        let (mut c, _) = ending_control(finite, Duration::ZERO, delivered_seconds * 44100);
+        c.observe();
+        assert_eq!(c.snapshot().phase, expected);
+    }
+    let (mut c, _) = ending_control(finite, Duration::from_secs(17990), 44100 * 2);
+    c.active.as_mut().unwrap().start = StartPosition::Calibrated {
+        offset: Duration::from_secs(17998),
+        max_error: Duration::from_millis(10),
+    };
+    c.observe();
+    assert_eq!(c.snapshot().phase, Phase::Ended);
+    assert_eq!(
+        c.snapshot().position.unwrap().absolute,
+        Duration::from_secs(18000)
+    );
+}
+
 fn caps(timeline: Timeline, seek_policy: SeekPolicy) -> PlaybackCapabilities {
     PlaybackCapabilities {
         timeline,

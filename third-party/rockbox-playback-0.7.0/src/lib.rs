@@ -2456,6 +2456,9 @@ impl Engine {
             }
             let space = cap.saturating_sub(ring.len());
             let end = (pos + space).min(pcm.len());
+            if let Some(session) = &self.managed {
+                session.record_queued_output((end - pos) / 2);
+            }
             ring.extend(&pcm[pos..end]);
             pos = end;
         }

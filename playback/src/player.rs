@@ -585,6 +585,10 @@ impl PlayerInternal {
             });
         if self.source_phase != Some(snapshot.phase) {
             self.source_phase = Some(snapshot.phase);
+            if snapshot.phase == Phase::Ended && snapshot.desired == DesiredState::Playing {
+                self.handle_track_end();
+                return;
+            }
             if snapshot.phase == Phase::Failed {
                 error!(
                     reason = error.as_deref().unwrap_or("audio stream failed"),
@@ -628,6 +632,7 @@ impl PlayerInternal {
         loop {
             let commands = Arc::clone(&self.commands);
             tokio::select! {
+                biased;
                 cmd = futures_util::future::poll_fn(move |cx| commands.lock().unwrap().poll_recv(cx)) => {
                     match cmd {
                         // client has disconnected - shut down.
@@ -1018,27 +1023,7 @@ impl PlayerInternal {
                             is_playing: false,
                             ..playback_state
                         });
-                    // Repeat one: reload the finished track and stay put.
-                    if self.repeat_mode == 2 {
-                        self.send_event(PlayerEvent::EndOfTrack {
-                            is_last_track: false,
-                        });
-                        let (current_track, _) = self.tracklist.lock().unwrap().current_track();
-                        if let Some(track) = current_track {
-                            self.handle_command_load(&track.uri);
-                        }
-                        return;
-                    }
-                    let is_last_track = self.tracklist.lock().unwrap().is_empty();
-                    self.send_event(PlayerEvent::EndOfTrack {
-                        is_last_track: is_last_track && self.repeat_mode == 0,
-                    });
-                    if is_last_track && self.repeat_mode == 1 {
-                        // Repeat all: wrap back to the start of the queue.
-                        self.handle_play_track_at(0);
-                        return;
-                    }
-                    self.handle_next();
+                    self.handle_track_end();
                 }
             }
         }
@@ -1642,6 +1627,24 @@ impl PlayerInternal {
         self.send_event(PlayerEvent::VolumeSet { volume });
     }
 
+    /// Queue policy is independent of the source that just ended.
+    fn handle_track_end(&mut self) {
+        let is_last_track = self.tracklist.lock().unwrap().is_empty();
+        self.send_event(PlayerEvent::EndOfTrack {
+            is_last_track: is_last_track && self.repeat_mode == 0,
+        });
+        if self.repeat_mode == 2 {
+            let (current, _) = self.tracklist.lock().unwrap().current_track();
+            if let Some(track) = current {
+                self.handle_command_load(&track.uri);
+            }
+        } else if is_last_track && self.repeat_mode == 1 {
+            self.handle_play_track_at(0);
+        } else {
+            self.handle_next();
+        }
+    }
+
     fn handle_next(&mut self) {
         if self.tracklist.lock().unwrap().next_track().is_some() {
             let (current_track, _) = self.tracklist.lock().unwrap().current_track();
@@ -1962,7 +1965,7 @@ mod queue_snapshot_tests {
 
     // Use an isolated TCP output, without a sound device or user settings.
     // These tests exercise host command handling; they do not play audio.
-    fn host(queue: Tracklist) -> (PlayerInternal, std::net::TcpListener) {
+    pub(super) fn host(queue: Tracklist) -> (PlayerInternal, std::net::TcpListener) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let output = format!("tcp-connect:{}", listener.local_addr().unwrap())
             .parse::<OutputConfig>()
@@ -2322,6 +2325,10 @@ mod queue_snapshot_tests {
         saved.prepare().unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "queue_advance_tests.rs"]
+mod queue_advance_tests;
 
 /// How often the queue snapshot is refreshed while playing (track changes
 /// save immediately).
