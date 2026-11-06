@@ -277,7 +277,7 @@ impl Player {
         let (output_spec, output) = match read_settings() {
             Ok(config) => match config.get_string("audio_output") {
                 Ok(spec) => match spec.parse::<OutputConfig>() {
-                    Ok(output) => (spec, Some(output)),
+                    Ok(output) => (spec, output),
                     Err(error) => {
                         let snapshot = PlayerRuntimeSnapshot::failed(
                             spec.clone(),
@@ -293,10 +293,10 @@ impl Player {
                     }
                 },
                 // A settings file without the key keeps the daemon default.
-                Err(_) => ("cpal".to_string(), Some(OutputConfig::Cpal)),
+                Err(_) => ("cpal".to_string(), OutputConfig::Cpal),
             },
             // No settings file is not a malformed file; CPAL remains default.
-            Err(_) => ("cpal".to_string(), Some(OutputConfig::Cpal)),
+            Err(_) => ("cpal".to_string(), OutputConfig::Cpal),
         };
         let listener_runtime: PlayerRuntime = Arc::new(Mutex::new(
             PlayerRuntimeSnapshot::starting(output_spec.clone()),
