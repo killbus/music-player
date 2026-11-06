@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn failed_local_runtime_rejects_play_playlist_without_commands() {
-    let (schema, _cmd_tx, mut cmd_rx, _tracklist, player_runtime) = setup_schema().await;
+    let (schema, _cmd_tx, cmd_rx, _tracklist, player_runtime) = setup_schema().await;
     {
         let mut snapshot = player_runtime.lock().unwrap();
         snapshot.phase = PlayerRuntimePhase::Failed;
@@ -29,6 +29,7 @@ async fn failed_local_runtime_rejects_play_playlist_without_commands() {
     let message = &response.errors[0].message;
     assert!(message.contains("test-output"), "{message}");
     assert!(message.contains("startup failed"), "{message}");
+    let mut cmd_rx = cmd_rx.lock().unwrap();
     assert!(matches!(
         cmd_rx.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Empty)

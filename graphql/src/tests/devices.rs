@@ -32,8 +32,7 @@ async fn list_cast_devices_hides_self_and_keeps_peer() {
         cast_device("peer-id", "http"),
     ]));
     let response = schema
-        .execute(Request::new("query { listCastDevices { id service } }"))
-        .data(devices)
+        .execute(Request::new("query { listCastDevices { id service } }").data(devices))
         .await;
     assert!(response.errors.is_empty(), "{:?}", response.errors);
     let rows = response.data.into_json().unwrap()["listCastDevices"]
@@ -53,13 +52,13 @@ async fn connecting_to_self_is_rejected_before_receiver_state_changes() {
         .unwrap();
     let devices = Arc::new(std::sync::Mutex::new(vec![cast_device(&daemon_id, "grpc")]));
     let response = schema
-        .execute(Request::new(
-            "mutation($id: ID!) { connectToCastDevice(id: $id) { id } }",
-        ))
-        .variables(async_graphql::Variables::from_value(
-            async_graphql::value!({ "id": daemon_id }),
-        ))
-        .data(devices)
+        .execute(
+            Request::new("mutation($id: ID!) { connectToCastDevice(id: $id) { id } }")
+                .variables(async_graphql::Variables::from_value(
+                    async_graphql::value!({ "id": daemon_id }),
+                ))
+                .data(devices),
+        )
         .await;
     assert_eq!(response.errors.len(), 1);
     assert!(response.errors[0]
