@@ -365,6 +365,7 @@ impl Player {
         // The engine handle is not Send (it wraps native state), so the async
         // player task runs on a small dedicated current-thread runtime instead
         // of the caller's work-stealing runtime.
+        let returned_runtime = Arc::clone(&listener_runtime);
         thread::spawn(move || {
             let player_runtime = Arc::clone(&listener_runtime);
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -403,7 +404,7 @@ impl Player {
         (
             Player {
                 commands: Some(cmd_tx),
-                runtime,
+                runtime: returned_runtime,
             },
             event_receiver,
         )

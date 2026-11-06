@@ -19,7 +19,7 @@ async fn main() -> std::io::Result<()> {
     let db = Database::new().await;
     let sources = music_player_playback::source_resolver::SourceResolver::for_daemon(db.clone())
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-    let (_, _) = Player::with_source_resolver(
+    let (player, _) = Player::with_source_resolver(
         move |_| {},
         cloned_cmd_tx,
         cloned_cmd_rx,
@@ -35,5 +35,5 @@ async fn main() -> std::io::Result<()> {
             std::sync::Arc::new(registry),
         ))
     };
-    start_webui(cmd_tx, tracklist, providers, db, sources).await
+    start_webui(cmd_tx, tracklist, providers, db, sources, player.runtime()).await
 }

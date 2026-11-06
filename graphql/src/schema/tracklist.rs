@@ -481,15 +481,13 @@ impl TracklistMutation {
                 .unwrap_or(legacy)
                 .into();
         }
-        let local_runtime = if device.client.is_none() {
-            Some(require_local_player_ready(ctx)?)
-        } else {
-            None
-        };
+        if device.client.is_none() {
+            require_local_player_ready(ctx)?;
+        }
         load_tracks_with_resolver(
             source_resolver(ctx)?,
             player_cmd,
-            local_runtime.as_ref(),
+            None,
             device.client.as_mut(),
             source_ip,
             vec![track],
@@ -692,6 +690,9 @@ impl TracklistMutation {
             let mut device = current_device.lock().await;
             let receiver = device.client.as_mut();
 
+            if receiver.is_none() {
+                require_local_player_ready(ctx)?;
+            }
             load_tracks_with_resolver(
                 source_resolver(ctx)?,
                 player_cmd,
@@ -713,6 +714,9 @@ impl TracklistMutation {
         let current_device = ctx.data::<Arc<Mutex<CurrentReceiverDevice>>>().unwrap();
         let mut device = current_device.lock().await;
 
+        if device.client.is_none() {
+            require_local_player_ready(ctx)?;
+        }
         if device.client.is_some() {
             let receiver = device.client.as_mut().unwrap();
             let will_play_on_chromecast = receiver.device_type() == CHROMECAST_DEVICE;

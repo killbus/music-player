@@ -1,4 +1,4 @@
-use music_player_playback::player::Player;
+use music_player_playback::player::{Player, PlayerRuntimePhase, PlayerRuntimeSnapshot};
 use music_player_storage::Database;
 use music_player_tracklist::Tracklist;
 use std::{env, sync::Arc, thread, time::Duration};
@@ -28,13 +28,18 @@ async fn start_webui() {
     let cloned_cmd_rx = Arc::clone(&cmd_rx);
     let sources =
         music_player_playback::source_resolver::SourceResolver::from_settings(db_conn.clone());
-    let (_, _) = Player::with_source_resolver(
+    let (player, _) = Player::with_source_resolver(
         move |_| {},
         cloned_cmd_tx,
         cloned_cmd_rx,
         cloned_tracklist,
         sources.clone(),
     );
+    let player_runtime = Arc::new(std::sync::Mutex::new(PlayerRuntimeSnapshot {
+        output: "test-output".to_string(),
+        phase: PlayerRuntimePhase::Ready,
+        error: None,
+    }));
 
     thread::spawn(move || {
         let rt = runtime::Builder::new_current_thread()
@@ -47,7 +52,15 @@ async fn start_webui() {
             let providers = std::sync::Arc::new(music_player_provider::ProviderState::new(
                 std::sync::Arc::new(registry),
             ));
-            super::start_webui(cmd_tx, tracklist, providers, db_conn, sources).await
+            super::start_webui(
+                cmd_tx,
+                tracklist,
+                providers,
+                db_conn,
+                sources,
+                player_runtime,
+            )
+            .await
         })
         .unwrap();
     });
