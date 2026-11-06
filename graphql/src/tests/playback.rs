@@ -7,8 +7,8 @@ use std::{sync::Arc, thread, time::Duration};
 
 #[tokio::test]
 async fn currently_playing_song() {
-    let (schema, cmd_tx, cmd_rx, tracklist) = setup_schema().await;
-    let (_, _) = Player::new(
+    let (schema, cmd_tx, cmd_rx, tracklist, player_runtime) = setup_schema().await;
+    let (_, _, _) = Player::new_with_runtime(
         |_| {},
         Arc::clone(&cmd_tx),
         Arc::clone(&cmd_rx),
@@ -119,8 +119,8 @@ async fn currently_playing_song() {
 
 #[tokio::test]
 async fn next() {
-    let (schema, cmd_tx, cmd_rx, tracklist) = setup_schema().await;
-    let (_, _) = Player::new(
+    let (schema, cmd_tx, cmd_rx, tracklist, player_runtime) = setup_schema().await;
+    let (_, _, _) = Player::new_with_runtime(
         |_| {},
         Arc::clone(&cmd_tx),
         Arc::clone(&cmd_rx),
@@ -205,8 +205,8 @@ async fn next() {
 
 #[tokio::test]
 async fn previous() {
-    let (schema, cmd_tx, cmd_rx, tracklist) = setup_schema().await;
-    let (_, _) = Player::new(
+    let (schema, cmd_tx, cmd_rx, tracklist, player_runtime) = setup_schema().await;
+    let (_, _, _) = Player::new_with_runtime(
         |_| {},
         Arc::clone(&cmd_tx),
         Arc::clone(&cmd_rx),
@@ -303,8 +303,8 @@ async fn previous() {
 
 #[tokio::test]
 async fn play() {
-    let (schema, cmd_tx, cmd_rx, tracklist) = setup_schema().await;
-    let (_, _) = Player::new(
+    let (schema, cmd_tx, cmd_rx, tracklist, player_runtime) = setup_schema().await;
+    let (_, _, _) = Player::new_with_runtime(
         |_| {},
         Arc::clone(&cmd_tx),
         Arc::clone(&cmd_rx),
@@ -401,8 +401,8 @@ async fn play() {
 
 #[tokio::test]
 async fn pause() {
-    let (schema, cmd_tx, cmd_rx, tracklist) = setup_schema().await;
-    let (_, _) = Player::new(
+    let (schema, cmd_tx, cmd_rx, tracklist, player_runtime) = setup_schema().await;
+    let (_, _, _) = Player::new_with_runtime(
         |_| {},
         Arc::clone(&cmd_tx),
         Arc::clone(&cmd_rx),
@@ -487,8 +487,8 @@ async fn pause() {
 
 #[tokio::test]
 async fn stop() {
-    let (schema, cmd_tx, cmd_rx, tracklist) = setup_schema().await;
-    let (_, _) = Player::new(
+    let (schema, cmd_tx, cmd_rx, tracklist, player_runtime) = setup_schema().await;
+    let (_, _, _) = Player::new_with_runtime(
         |_| {},
         Arc::clone(&cmd_tx),
         Arc::clone(&cmd_rx),

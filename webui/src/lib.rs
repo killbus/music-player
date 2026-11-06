@@ -24,6 +24,7 @@ use music_player_graphql::{
     MusicPlayerSchema,
 };
 use music_player_playback::player::PlayerCommand;
+use music_player_playback::player::PlayerRuntime;
 use music_player_provider::ProviderState;
 use music_player_renderer::CurrentReceiverDevice;
 use music_player_settings::{get_application_directory, read_settings, Settings};
@@ -137,6 +138,7 @@ pub async fn start_webui(
     providers: Arc<ProviderState>,
     db: Database,
     sources: music_player_playback::source_resolver::SourceResolver,
+    player_runtime: PlayerRuntime,
 ) -> std::io::Result<()> {
     let config = read_settings().unwrap();
     let settings = config.try_deserialize::<Settings>().unwrap();
@@ -160,6 +162,7 @@ pub async fn start_webui(
     .data(receiver_device)
     .data(Arc::clone(&providers))
     .data(searcher)
+    .data(player_runtime)
     .finish();
     println!("Starting webui at {}", addr.bright_green());
 

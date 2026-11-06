@@ -105,7 +105,7 @@ fn boot() {
     // The engine handle is not Send — Player::new parks it on its own
     // dedicated current-thread runtime internally.
     let broadcast_peers = Arc::clone(&peer_map);
-    let (_player, _) = Player::with_source_resolver(
+    let (player, _) = Player::with_source_resolver(
         move |event| match event {
             PlayerEvent::CurrentTrack {
                 track,
@@ -147,6 +147,7 @@ fn boot() {
         Arc::clone(&tracklist),
         sources.clone(),
     );
+    let player_runtime = player.runtime();
 
     // Library scan: initial (only when the library is empty) + periodic.
     std::thread::spawn(|| {
@@ -235,7 +236,14 @@ fn boot() {
     }
 
     // Webui (GraphQL + /covers/ album art) — parks this thread forever.
-    if let Err(e) = runtime.block_on(start_webui(cmd_tx, tracklist, providers, db, sources)) {
+    if let Err(e) = runtime.block_on(start_webui(
+        cmd_tx,
+        tracklist,
+        providers,
+        db,
+        sources,
+        player_runtime,
+    )) {
         tracing::error!("webui failed: {e}");
     }
 }

@@ -1,7 +1,10 @@
 use super::*;
 use async_graphql::{EmptySubscription, Request, Schema, Variables};
 use migration::{Migrator, MigratorTrait};
-use music_player_playback::source_resolver::SourceResolver;
+use music_player_playback::{
+    player::{PlayerRuntime, PlayerRuntimePhase, PlayerRuntimeSnapshot},
+    source_resolver::SourceResolver,
+};
 use music_player_storage::saved_servers;
 use music_player_storage::Database;
 use music_player_types::source::{RemoteIdentity, ResourceKind, SourceRef};
@@ -25,7 +28,7 @@ async fn saved_account_batch_preserves_choices_and_returns_player_occurrences() 
         saved_servers::bind_remote_identity(db.get_connection(), &row, &source.remote).await.unwrap();
         let track = json!({"id":source.to_handle(),"uri":source.to_handle(),"title":"Same episode","discNumber":0});
         let resolver = SourceResolver::new(db.clone(), "graphql-selection-fixture".into(), true);
-        let (schema, mut commands, queue) = api();
+        let (schema, mut commands, queue, _) = api();
         let mutation = "mutation($entries: [SelectedMediaInput!]!) { addSelectedMedia(entries: $entries) }";
         // The malformed account comes second: rejecting it must not enqueue
         // the first valid entry or require a live server authentication.
@@ -67,20 +70,27 @@ fn api() -> (
     Schema<MediaQuery, MediaMutation, EmptySubscription>,
     tokio::sync::mpsc::UnboundedReceiver<PlayerCommand>,
     Arc<StdMutex<Tracklist>>,
+    PlayerRuntime,
 ) {
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
     let queue = Arc::new(StdMutex::new(Tracklist::new_empty()));
+    let runtime = Arc::new(std::sync::Mutex::new(PlayerRuntimeSnapshot {
+        output: "test-output".to_string(),
+        phase: PlayerRuntimePhase::Ready,
+        error: None,
+    }));
     let schema = Schema::build(MediaQuery, MediaMutation, EmptySubscription)
         .data(Arc::new(StdMutex::new(sender)))
         .data(Arc::new(Mutex::new(CurrentReceiverDevice::new())))
         .data(queue.clone())
+        .data(runtime.clone())
         .finish();
-    (schema, receiver, queue)
+    (schema, receiver, queue, runtime)
 }
 
 #[tokio::test]
 async fn malformed_choice_rejects_whole_batch_before_command() {
-    let (schema, mut commands, _) = api();
+    let (schema, mut commands, _, _) = api();
     for choice in [
         json!({"mediaSourceId":"version-a"}),
         json!({"audioStreamIndex":0}),
@@ -104,8 +114,30 @@ async fn malformed_choice_rejects_whole_batch_before_command() {
 }
 
 #[tokio::test]
+async fn failed_local_runtime_rejects_selected_media_without_a_command() {
+    let (schema, mut commands, _, runtime) = api();
+    *runtime.lock().unwrap() = PlayerRuntimeSnapshot {
+        output: "tcp:127.0.0.1:9".to_string(),
+        phase: PlayerRuntimePhase::Failed,
+        error: Some("output unavailable".to_string()),
+    };
+    let response = schema
+        .execute(Request::new(
+            "mutation { playSelectedMedia(entry: {track: {id: \"legacy\", uri: \"file.mp3\", title: \"Song\", discNumber: 0}}) }",
+        ))
+        .await;
+    assert_eq!(response.errors.len(), 1);
+    assert!(response.errors[0].message.contains("tcp:127.0.0.1:9"));
+    assert!(response.errors[0].message.contains("output unavailable"));
+    assert!(matches!(
+        commands.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+}
+
+#[tokio::test]
 async fn selection_passes_real_zero_index_and_returns_player_rejection() {
-    let (schema, mut commands, _) = api();
+    let (schema, mut commands, _, runtime) = api();
     let request = Request::new(
         "mutation { selectMediaAudio(occurrenceId: \"removed-occurrence\", choice: {mediaSourceId: \"version-a\", audioStreamIndex: 0}) }"
     );
@@ -144,7 +176,7 @@ async fn selection_passes_real_zero_index_and_returns_player_rejection() {
 
 #[tokio::test]
 async fn queue_query_distinguishes_duplicate_items() {
-    let (schema, _, queue) = api();
+    let (schema, _, queue, _) = api();
     let track = music_player_entity::track::Model {
         id: "same-song".into(),
         uri: "file.mp3".into(),

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn playlist() {
-    let (schema, cmd_tx, cmd_rx, tracklist) = setup_schema().await;
+    let (schema, cmd_tx, cmd_rx, tracklist, player_runtime) = setup_schema().await;
     let (_, _) = Player::new(
         |_| {},
         Arc::clone(&cmd_tx),
@@ -45,7 +45,7 @@ async fn playlist() {
 
 #[tokio::test]
 async fn playlists() {
-    let (schema, cmd_tx, cmd_rx, tracklist) = setup_schema().await;
+    let (schema, cmd_tx, cmd_rx, tracklist, player_runtime) = setup_schema().await;
     let (_, _) = Player::new(
         |_| {},
         Arc::clone(&cmd_tx),
@@ -69,7 +69,7 @@ async fn playlists() {
 
 #[tokio::test]
 async fn folder() {
-    let (schema, cmd_tx, cmd_rx, tracklist) = setup_schema().await;
+    let (schema, cmd_tx, cmd_rx, tracklist, player_runtime) = setup_schema().await;
     let (_, _) = Player::new(
         |_| {},
         Arc::clone(&cmd_tx),
@@ -106,7 +106,7 @@ async fn folder() {
 
 #[tokio::test]
 async fn folders() {
-    let (schema, cmd_tx, cmd_rx, tracklist) = setup_schema().await;
+    let (schema, cmd_tx, cmd_rx, tracklist, player_runtime) = setup_schema().await;
     let (_, _) = Player::new(
         |_| {},
         Arc::clone(&cmd_tx),
@@ -129,7 +129,7 @@ async fn folders() {
 
 #[tokio::test]
 async fn create_playlist() {
-    let (schema, cmd_tx, cmd_rx, tracklist) = setup_schema().await;
+    let (schema, cmd_tx, cmd_rx, tracklist, player_runtime) = setup_schema().await;
     let (_, _) = Player::new(
         |_| {},
         Arc::clone(&cmd_tx),
@@ -161,7 +161,7 @@ async fn create_playlist() {
 
 #[tokio::test]
 async fn delete_playlist() {
-    let (schema, cmd_tx, cmd_rx, tracklist) = setup_schema().await;
+    let (schema, cmd_tx, cmd_rx, tracklist, player_runtime) = setup_schema().await;
     let (_, _) = Player::new(
         |_| {},
         Arc::clone(&cmd_tx),
@@ -185,7 +185,7 @@ async fn delete_playlist() {
 
 #[tokio::test]
 async fn add_track_to_playlist() {
-    let (_schema, cmd_tx, cmd_rx, tracklist) = setup_schema().await;
+    let (_schema, cmd_tx, cmd_rx, tracklist, player_runtime) = setup_schema().await;
     let (_, _) = Player::new(
         |_| {},
         Arc::clone(&cmd_tx),
@@ -196,7 +196,7 @@ async fn add_track_to_playlist() {
 
 #[tokio::test]
 async fn remove_track_from_playlist() {
-    let (_schema, cmd_tx, cmd_rx, tracklist) = setup_schema().await;
+    let (_schema, cmd_tx, cmd_rx, tracklist, player_runtime) = setup_schema().await;
     let (_, _) = Player::new(
         |_| {},
         Arc::clone(&cmd_tx),
@@ -207,7 +207,7 @@ async fn remove_track_from_playlist() {
 
 #[tokio::test]
 async fn rename_playlist() {
-    let (schema, cmd_tx, cmd_rx, tracklist) = setup_schema().await;
+    let (schema, cmd_tx, cmd_rx, tracklist, player_runtime) = setup_schema().await;
     let (_, _) = Player::new(
         |_| {},
         Arc::clone(&cmd_tx),
@@ -245,7 +245,7 @@ async fn rename_playlist() {
 
 #[tokio::test]
 async fn create_folder() {
-    let (schema, cmd_tx, cmd_rx, tracklist) = setup_schema().await;
+    let (schema, cmd_tx, cmd_rx, tracklist, player_runtime) = setup_schema().await;
     let (_, _) = Player::new(
         |_| {},
         Arc::clone(&cmd_tx),
@@ -277,7 +277,7 @@ async fn create_folder() {
 
 #[tokio::test]
 async fn delete_folder() {
-    let (schema, cmd_tx, cmd_rx, tracklist) = setup_schema().await;
+    let (schema, cmd_tx, cmd_rx, tracklist, player_runtime) = setup_schema().await;
     let (_, _) = Player::new(
         |_| {},
         Arc::clone(&cmd_tx),
@@ -310,7 +310,7 @@ async fn delete_folder() {
 
 #[tokio::test]
 async fn rename_folder() {
-    let (schema, cmd_tx, cmd_rx, tracklist) = setup_schema().await;
+    let (schema, cmd_tx, cmd_rx, tracklist, player_runtime) = setup_schema().await;
     let (_, _) = Player::new(
         |_| {},
         Arc::clone(&cmd_tx),
@@ -347,7 +347,7 @@ async fn rename_folder() {
 
 #[tokio::test]
 async fn move_playlist_to_folder() {
-    let (schema, cmd_tx, cmd_rx, tracklist) = setup_schema().await;
+    let (schema, cmd_tx, cmd_rx, tracklist, player_runtime) = setup_schema().await;
     let (_, _) = Player::new(
         |_| {},
         Arc::clone(&cmd_tx),
@@ -406,7 +406,7 @@ async fn move_playlist_to_folder() {
 
 #[tokio::test]
 async fn move_playlists_to_folder() {
-    let (schema, cmd_tx, cmd_rx, tracklist) = setup_schema().await;
+    let (schema, cmd_tx, cmd_rx, tracklist, player_runtime) = setup_schema().await;
     let (_, _) = Player::new(
         |_| {},
         Arc::clone(&cmd_tx),

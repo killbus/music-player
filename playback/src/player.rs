@@ -16,6 +16,7 @@ use rockbox_playback::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    panic::{catch_unwind, AssertUnwindSafe},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -145,6 +146,48 @@ pub enum RepeatState {
     All,
 }
 
+/// Lifecycle of the daemon's local audio output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlayerRuntimePhase {
+    Starting,
+    Ready,
+    Failed,
+}
+
+/// Cheap, observable startup state for the local output.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlayerRuntimeSnapshot {
+    pub output: String,
+    pub phase: PlayerRuntimePhase,
+    pub error: Option<String>,
+}
+
+impl PlayerRuntimeSnapshot {
+    fn starting(output: impl Into<String>) -> Self {
+        Self {
+            output: output.into(),
+            phase: PlayerRuntimePhase::Starting,
+            error: None,
+        }
+    }
+
+    fn failed(output: impl Into<String>, error: impl Into<String>) -> Self {
+        Self {
+            output: output.into(),
+            phase: PlayerRuntimePhase::Failed,
+            error: Some(error.into()),
+        }
+    }
+}
+
+pub type PlayerRuntime = Arc<Mutex<PlayerRuntimeSnapshot>>;
+
+fn publish_runtime(runtime: &PlayerRuntime, phase: PlayerRuntimePhase, error: Option<String>) {
+    let mut snapshot = runtime.lock().unwrap();
+    snapshot.phase = phase;
+    snapshot.error = error;
+}
+
 #[async_trait]
 pub trait PlayerEngine: Send + Sync {
     fn load(&mut self, track_id: &str, _start_playing: bool, _position_ms: u32);
@@ -170,6 +213,7 @@ pub trait PlayerEngine: Send + Sync {
 #[derive(Clone)]
 pub struct Player {
     commands: Option<Arc<std::sync::Mutex<mpsc::UnboundedSender<PlayerCommand>>>>,
+    runtime: PlayerRuntime,
 }
 
 impl Player {
@@ -183,6 +227,22 @@ impl Player {
         G: Fn(PlayerEvent) + Send + 'static,
     {
         Self::new_inner(event_broadcaster, cmd_tx, cmd_rx, tracklist, None)
+    }
+
+    /// Test helper that also returns the runtime so schema fixtures can
+    /// inject exactly the same state the player owns.
+    pub fn new_with_runtime<G>(
+        event_broadcaster: G,
+        cmd_tx: Arc<std::sync::Mutex<mpsc::UnboundedSender<PlayerCommand>>>,
+        cmd_rx: Arc<std::sync::Mutex<mpsc::UnboundedReceiver<PlayerCommand>>>,
+        tracklist: Arc<std::sync::Mutex<Tracklist>>,
+    ) -> (Player, PlayerEventChannel, PlayerRuntime)
+    where
+        G: Fn(PlayerEvent) + Send + 'static,
+    {
+        let (player, events) = Self::new_inner(event_broadcaster, cmd_tx, cmd_rx, tracklist, None);
+        let runtime = player.runtime();
+        (player, events, runtime)
     }
 
     /// Daemon entry points supply the saved-account resolver; short-lived local
@@ -212,24 +272,42 @@ impl Player {
     {
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
 
+        // Capture the configured output before the thread starts so a
+        // malformed setting is visible even when no engine is created.
+        let (output_spec, output) = match read_settings() {
+            Ok(config) => match config.get_string("audio_output") {
+                Ok(spec) => match spec.parse::<OutputConfig>() {
+                    Ok(output) => (spec, Some(output)),
+                    Err(error) => {
+                        let snapshot = PlayerRuntimeSnapshot::failed(
+                            spec.clone(),
+                            format!("Invalid audio_output setting {:?}: {}", spec, error),
+                        );
+                        return (
+                            Player {
+                                commands: Some(cmd_tx),
+                                runtime: Arc::new(Mutex::new(snapshot)),
+                            },
+                            event_receiver,
+                        );
+                    }
+                },
+                // A settings file without the key keeps the daemon default.
+                Err(_) => ("cpal".to_string(), Some(OutputConfig::Cpal)),
+            },
+            // No settings file is not a malformed file; CPAL remains default.
+            Err(_) => ("cpal".to_string(), Some(OutputConfig::Cpal)),
+        };
+        let listener_runtime: PlayerRuntime = Arc::new(Mutex::new(
+            PlayerRuntimeSnapshot::starting(output_spec.clone()),
+        ));
+
         let start = move || {
-            // `audio_output` in settings.toml selects the output backend:
-            // "cpal" (default), "stdout", "fifo:PATH", "unix:PATH" or "tcp:ADDR".
-            let output = read_settings()
-                .ok()
-                .and_then(|config| config.get_string("audio_output").ok())
-                .map(|spec| {
-                    spec.parse::<OutputConfig>().unwrap_or_else(|e| {
-                        error!("Invalid audio_output setting {:?}: {}", spec, e);
-                        OutputConfig::Cpal
-                    })
-                })
-                .unwrap_or(OutputConfig::Cpal);
             let engine = match PlayerConfig::builder().output(output).open() {
                 Ok(engine) => engine,
                 Err(e) => {
                     error!("Failed to open audio engine: {}", e);
-                    return None;
+                    return Err(e.to_string());
                 }
             };
             // Restore the persisted [audio] settings (EQ, tone, replaygain,
@@ -240,7 +318,7 @@ impl Player {
             {
                 apply_audio_settings(&engine, &settings.audio);
             }
-            Some(PlayerInternal {
+            Ok(Some(PlayerInternal {
                 source_playback: resolver.map(SourcePlayback::new),
                 source_phase: None,
                 music_crossfade: read_settings()
@@ -281,24 +359,51 @@ impl Player {
                 prefetch_landed: Arc::new(AtomicBool::new(false)),
                 icy_station: None,
                 icy_last: None,
-            })
+            }))
         };
 
         // The engine handle is not Send (it wraps native state), so the async
         // player task runs on a small dedicated current-thread runtime instead
         // of the caller's work-stealing runtime.
         thread::spawn(move || {
+            let player_runtime = Arc::clone(&listener_runtime);
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("Failed to create Tokio runtime");
-            if let Some(internal) = start() {
-                runtime.block_on(internal.run());
+            match catch_unwind(AssertUnwindSafe(|| match start() {
+                Ok(Some(internal)) => {
+                    publish_runtime(&player_runtime, PlayerRuntimePhase::Ready, None);
+                    Ok(runtime.block_on(internal.run()))
+                }
+                Ok(None) => Ok(()),
+                Err(error) => Err(error),
+            })) {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    publish_runtime(&player_runtime, PlayerRuntimePhase::Failed, Some(error));
+                }
+                Err(panic) => {
+                    let message = if let Some(message) = panic.downcast_ref::<&str>() {
+                        message.to_string()
+                    } else if let Some(message) = panic.downcast_ref::<String>() {
+                        message.clone()
+                    } else {
+                        "Local output panicked during startup or playback".to_string()
+                    };
+                    let output = player_runtime.lock().unwrap().output.clone();
+                    publish_runtime(
+                        &player_runtime,
+                        PlayerRuntimePhase::Failed,
+                        Some(format!("Local output failed: {}", message)),
+                    );
+                }
             }
         });
         (
             Player {
                 commands: Some(cmd_tx),
+                runtime,
             },
             event_receiver,
         )
@@ -316,6 +421,10 @@ impl Player {
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
         self.command(PlayerCommand::AddEventSender(event_sender));
         event_receiver
+    }
+
+    pub fn runtime(&self) -> PlayerRuntime {
+        Arc::clone(&self.runtime)
     }
 
     pub async fn await_end_of_track(&self) {

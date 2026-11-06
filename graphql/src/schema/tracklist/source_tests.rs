@@ -328,7 +328,6 @@ async fn different_resolver_cannot_skip_batch_validation_for_same_account_and_re
             &resolver,
             &api.commands,
             None,
-            None,
             tracks,
             Some(0),
             false

@@ -99,6 +99,12 @@ export const handlers = [
   graphql.mutation("PlayTrackAt", () =>
     HttpResponse.json({ data: { playTrackAt: true } })
   ),
+  graphql.mutation("ConnectToCastDevice", () =>
+    HttpResponse.json({ data: { connectToCastDevice: { id: "peer" } } })
+  ),
+  graphql.mutation("DisconnectFromCastDevice", () =>
+    HttpResponse.json({ data: { disconnectFromCastDevice: null } })
+  ),
   graphql.mutation("LikeTrack", () =>
     HttpResponse.json({ data: { likeTrack: true } })
   ),

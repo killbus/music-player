@@ -18,7 +18,10 @@ use std::sync::Mutex as StdMutex;
 use tokio::sync::{mpsc::UnboundedSender, Mutex};
 
 use crate::replace_host;
-use crate::{load_tracks_with_resolver, reject_source_receiver, source_resolver, validate_queue};
+use crate::{
+    load_tracks_with_resolver, reject_source_receiver, require_local_player_ready, source_resolver,
+    validate_queue,
+};
 
 use super::provider;
 use crate::simple_broker::SimpleBroker;
@@ -123,6 +126,9 @@ impl TracklistMutation {
                 .lock()
                 .await;
             reject_source_receiver(std::slice::from_ref(&track), device.client.is_some())?;
+            if device.client.is_none() {
+                require_local_player_ready(ctx)?;
+            }
             player_cmd
                 .lock()
                 .unwrap()
@@ -150,6 +156,7 @@ impl TracklistMutation {
             if let Some(receiver) = receiver {
                 receiver.load(track.clone().into()).await?;
             } else {
+                require_local_player_ready(ctx)?;
                 player_cmd
                     .lock()
                     .unwrap()
@@ -185,6 +192,7 @@ impl TracklistMutation {
         track.album = album.unwrap_or_default();
         validate_queue(source_resolver(ctx)?, std::slice::from_mut(&mut track)).await?;
 
+        require_local_player_ready(ctx)?;
         player_cmd
             .lock()
             .unwrap()
@@ -221,6 +229,7 @@ impl TracklistMutation {
                 receiver.load(track.into()).await?;
             }
         } else if !tracks.is_empty() {
+            require_local_player_ready(ctx)?;
             ctx.data::<Arc<StdMutex<UnboundedSender<PlayerCommand>>>>()?
                 .lock()
                 .unwrap()
@@ -245,6 +254,7 @@ impl TracklistMutation {
         let player_cmd = ctx
             .data::<Arc<StdMutex<UnboundedSender<PlayerCommand>>>>()
             .unwrap();
+        require_local_player_ready(ctx)?;
         player_cmd
             .lock()
             .unwrap()
@@ -275,6 +285,7 @@ impl TracklistMutation {
         let player_cmd = ctx
             .data::<Arc<std::sync::Mutex<UnboundedSender<PlayerCommand>>>>()
             .unwrap();
+        require_local_player_ready(ctx)?;
         player_cmd
             .lock()
             .unwrap()
@@ -306,6 +317,7 @@ impl TracklistMutation {
         let player_cmd = ctx
             .data::<Arc<StdMutex<UnboundedSender<PlayerCommand>>>>()
             .unwrap();
+        require_local_player_ready(ctx)?;
         player_cmd
             .lock()
             .unwrap()
@@ -336,6 +348,9 @@ impl TracklistMutation {
                 .lock()
                 .await;
             reject_source_receiver(std::slice::from_ref(&track), device.client.is_some())?;
+            if device.client.is_none() {
+                require_local_player_ready(ctx)?;
+            }
             ctx.data::<Arc<StdMutex<UnboundedSender<PlayerCommand>>>>()?
                 .lock()
                 .unwrap()
@@ -390,6 +405,9 @@ impl TracklistMutation {
 
         normalize_queue(std::slice::from_mut(&mut track)).map_err(|e| Error::new(e.to_string()))?;
         reject_source_receiver(std::slice::from_ref(&track), device.client.is_some())?;
+        if device.client.is_none() {
+            require_local_player_ready(ctx)?;
+        }
         validate_queue(source_resolver(ctx)?, std::slice::from_mut(&mut track)).await?;
 
         if device.client.is_some() {
@@ -407,6 +425,7 @@ impl TracklistMutation {
         let player_cmd = ctx
             .data::<Arc<StdMutex<UnboundedSender<PlayerCommand>>>>()
             .unwrap();
+        require_local_player_ready(ctx)?;
         player_cmd
             .lock()
             .unwrap()
@@ -462,9 +481,15 @@ impl TracklistMutation {
                 .unwrap_or(legacy)
                 .into();
         }
+        let local_runtime = if device.client.is_none() {
+            Some(require_local_player_ready(ctx)?)
+        } else {
+            None
+        };
         load_tracks_with_resolver(
             source_resolver(ctx)?,
             player_cmd,
+            local_runtime.as_ref(),
             device.client.as_mut(),
             source_ip,
             vec![track],
@@ -500,9 +525,13 @@ impl TracklistMutation {
             let mut device = current_device.lock().await;
             let receiver = device.client.as_mut();
 
+            if receiver.is_none() {
+                require_local_player_ready(ctx)?;
+            }
             load_tracks_with_resolver(
                 source_resolver(ctx)?,
                 player_cmd,
+                None,
                 receiver,
                 Some(source_ip),
                 tracks,
@@ -518,6 +547,9 @@ impl TracklistMutation {
         let current_device = ctx.data::<Arc<Mutex<CurrentReceiverDevice>>>().unwrap();
         let mut device = current_device.lock().await;
 
+        if device.client.is_none() {
+            require_local_player_ready(ctx)?;
+        }
         if device.client.is_some() {
             let receiver = device.client.as_mut().unwrap();
             let will_play_on_chromecast = receiver.device_type() == CHROMECAST_DEVICE;
@@ -539,6 +571,7 @@ impl TracklistMutation {
         load_tracks_with_resolver(
             source_resolver(ctx)?,
             player_cmd,
+            None,
             device.client.as_mut(),
             None,
             result.tracks,
@@ -573,9 +606,13 @@ impl TracklistMutation {
             let mut device = current_device.lock().await;
             let receiver = device.client.as_mut();
 
+            if receiver.is_none() {
+                require_local_player_ready(ctx)?;
+            }
             load_tracks_with_resolver(
                 source_resolver(ctx)?,
                 player_cmd,
+                None,
                 receiver,
                 Some(source_ip),
                 artist.tracks,
@@ -591,6 +628,9 @@ impl TracklistMutation {
         let current_device = ctx.data::<Arc<Mutex<CurrentReceiverDevice>>>().unwrap();
         let mut device = current_device.lock().await;
 
+        if device.client.is_none() {
+            require_local_player_ready(ctx)?;
+        }
         if device.client.is_some() {
             let receiver = device.client.as_mut().unwrap();
             let will_play_on_chromecast = receiver.device_type() == CHROMECAST_DEVICE;
@@ -612,6 +652,7 @@ impl TracklistMutation {
         load_tracks_with_resolver(
             source_resolver(ctx)?,
             player_cmd,
+            None,
             device.client.as_mut(),
             None,
             artist.tracks,
@@ -654,6 +695,7 @@ impl TracklistMutation {
             load_tracks_with_resolver(
                 source_resolver(ctx)?,
                 player_cmd,
+                None,
                 receiver,
                 Some(source_ip),
                 tracks,
@@ -696,6 +738,7 @@ impl TracklistMutation {
         load_tracks_with_resolver(
             source_resolver(ctx)?,
             player_cmd,
+            None,
             device.client.as_mut(),
             None,
             tracks,

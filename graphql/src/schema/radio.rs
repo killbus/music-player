@@ -8,6 +8,8 @@ use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::require_local_player_ready;
+
 #[derive(Clone, SimpleObject, InputObject)]
 #[graphql(input_name = "RadioStationInput")]
 pub struct RadioStation {
@@ -405,6 +407,7 @@ impl RadioMutation {
 
     async fn play_radio(&self, ctx: &Context<'_>, station: RadioStation) -> Result<bool> {
         let sender = ctx.data::<Arc<Mutex<UnboundedSender<PlayerCommand>>>>()?;
+        require_local_player_ready(ctx)?;
         // A directory entry is often a playlist pointing at another playlist
         // (TuneIn always is), and some origins only answer a media proxy — so
         // the url is resolved before the engine ever sees it.

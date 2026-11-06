@@ -13,6 +13,8 @@ use music_player_types::{audio, source::SourceHandle};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{mpsc::UnboundedSender, oneshot, Mutex};
 
+use crate::require_local_player_ready;
+
 #[derive(SimpleObject)]
 pub struct AudioOptions {
     pub source: ID,
@@ -143,6 +145,7 @@ impl MediaMutation {
                 "Selected media playback is unavailable on this remote receiver",
             ));
         }
+        require_local_player_ready(ctx)?;
         crate::validate_queue(source_resolver(ctx)?, std::slice::from_mut(&mut track)).await?;
         let mut candidate = QueueEntry::new(track.clone());
         candidate.selection = selection.clone();
@@ -182,6 +185,7 @@ impl MediaMutation {
                 "Audio choices are unavailable on this remote receiver",
             ));
         }
+        require_local_player_ready(ctx)?;
         crate::validate_queue(source_resolver(ctx)?, &mut tracks)
             .await
             .map_err(|error| Error::new(error.to_string()))?;
@@ -225,6 +229,7 @@ impl MediaMutation {
                 "Audio choices are unavailable on this remote receiver",
             ));
         }
+        require_local_player_ready(ctx)?;
         let (reply, received) = oneshot::channel();
         ctx.data::<Arc<StdMutex<UnboundedSender<PlayerCommand>>>>()?
             .lock()

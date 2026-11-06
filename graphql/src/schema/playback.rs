@@ -11,14 +11,25 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex as TokioMutex;
 
 use super::objects::{
-    current_track::CurrentlyPlayingSong, player_state::PlayerState, track::Track,
+    current_track::CurrentlyPlayingSong,
+    player_runtime::{player_runtime, PlayerRuntimeType},
+    player_state::PlayerState,
+    track::Track,
 };
+use crate::require_local_player_ready;
+use music_player_playback::player::PlayerRuntime as PlayerRuntimeHandle;
 
 #[derive(Default)]
 pub struct PlaybackQuery;
 
 #[Object]
 impl PlaybackQuery {
+    async fn player_runtime(&self, ctx: &Context<'_>) -> Result<PlayerRuntimeType, Error> {
+        let runtime = ctx
+            .data::<PlayerRuntimeHandle>()
+            .map_err(|_| async_graphql::Error::new("Local player runtime is not configured"))?;
+        Ok(player_runtime(runtime))
+    }
     async fn currently_playing_song(
         &self,
         ctx: &Context<'_>,
@@ -91,6 +102,7 @@ impl PlaybackMutation {
         let player_cmd = ctx
             .data::<Arc<Mutex<UnboundedSender<PlayerCommand>>>>()
             .unwrap();
+        require_local_player_ready(ctx)?;
         player_cmd
             .lock()
             .unwrap()
@@ -114,6 +126,7 @@ impl PlaybackMutation {
         let player_cmd = ctx
             .data::<Arc<Mutex<UnboundedSender<PlayerCommand>>>>()
             .unwrap();
+        require_local_player_ready(ctx)?;
         player_cmd
             .lock()
             .unwrap()
@@ -137,6 +150,7 @@ impl PlaybackMutation {
         let player_cmd = ctx
             .data::<Arc<Mutex<UnboundedSender<PlayerCommand>>>>()
             .unwrap();
+        require_local_player_ready(ctx)?;
         player_cmd
             .lock()
             .unwrap()
@@ -160,6 +174,7 @@ impl PlaybackMutation {
         let player_cmd = ctx
             .data::<Arc<Mutex<UnboundedSender<PlayerCommand>>>>()
             .unwrap();
+        require_local_player_ready(ctx)?;
         player_cmd
             .lock()
             .unwrap()
@@ -183,6 +198,7 @@ impl PlaybackMutation {
         let player_cmd = ctx
             .data::<Arc<Mutex<UnboundedSender<PlayerCommand>>>>()
             .unwrap();
+        require_local_player_ready(ctx)?;
         player_cmd
             .lock()
             .unwrap()
@@ -206,6 +222,7 @@ impl PlaybackMutation {
         let player_cmd = ctx
             .data::<Arc<Mutex<UnboundedSender<PlayerCommand>>>>()
             .unwrap();
+        require_local_player_ready(ctx)?;
         player_cmd
             .lock()
             .unwrap()
