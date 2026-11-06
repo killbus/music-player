@@ -75,7 +75,7 @@ pub(crate) fn local_player_ready(
 pub(crate) fn require_local_player_ready(
     ctx: &async_graphql::Context<'_>,
 ) -> async_graphql::Result<PlayerRuntime> {
-    local_player_ready(ctx.data::<PlayerRuntime>().ok().as_ref())
+    local_player_ready(ctx.data::<PlayerRuntime>().ok())
 }
 
 const MEDIA_RENDERER: &str = "urn:schemas-upnp-org:device:MediaRenderer";

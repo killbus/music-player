@@ -487,7 +487,6 @@ impl TracklistMutation {
         load_tracks_with_resolver(
             source_resolver(ctx)?,
             player_cmd,
-            None,
             device.client.as_mut(),
             source_ip,
             vec![track],
@@ -529,7 +528,6 @@ impl TracklistMutation {
             load_tracks_with_resolver(
                 source_resolver(ctx)?,
                 player_cmd,
-                None,
                 receiver,
                 Some(source_ip),
                 tracks,
@@ -569,7 +567,6 @@ impl TracklistMutation {
         load_tracks_with_resolver(
             source_resolver(ctx)?,
             player_cmd,
-            None,
             device.client.as_mut(),
             None,
             result.tracks,
@@ -610,7 +607,6 @@ impl TracklistMutation {
             load_tracks_with_resolver(
                 source_resolver(ctx)?,
                 player_cmd,
-                None,
                 receiver,
                 Some(source_ip),
                 artist.tracks,
@@ -650,7 +646,6 @@ impl TracklistMutation {
         load_tracks_with_resolver(
             source_resolver(ctx)?,
             player_cmd,
-            None,
             device.client.as_mut(),
             None,
             artist.tracks,
@@ -696,7 +691,6 @@ impl TracklistMutation {
             load_tracks_with_resolver(
                 source_resolver(ctx)?,
                 player_cmd,
-                None,
                 receiver,
                 Some(source_ip),
                 tracks,
@@ -742,7 +736,6 @@ impl TracklistMutation {
         load_tracks_with_resolver(
             source_resolver(ctx)?,
             player_cmd,
-            None,
             device.client.as_mut(),
             None,
             tracks,

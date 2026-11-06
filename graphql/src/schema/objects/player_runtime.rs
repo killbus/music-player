@@ -1,18 +1,14 @@
 use async_graphql::*;
 use music_player_playback::player::{PlayerRuntime, PlayerRuntimePhase};
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Enum, Eq, PartialEq)]
 pub enum PlayerRuntimePhaseType {
+    #[graphql(name = "Starting")]
     Starting,
+    #[graphql(name = "Ready")]
     Ready,
+    #[graphql(name = "Failed")]
     Failed,
-}
-
-/// GraphQL objectives identify enum values by name.
-impl PlayerRuntimePhaseType {
-    pub const STARTING: Self = Self::Starting;
-    pub const READY: Self = Self::Ready;
-    pub const FAILED: Self = Self::Failed;
 }
 
 impl From<PlayerRuntimePhase> for PlayerRuntimePhaseType {

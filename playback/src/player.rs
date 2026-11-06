@@ -392,11 +392,14 @@ impl Player {
                     } else {
                         "Local output panicked during startup or playback".to_string()
                     };
-                    let output = player_runtime.lock().unwrap().output.clone();
                     publish_runtime(
                         &player_runtime,
                         PlayerRuntimePhase::Failed,
-                        Some(format!("Local output failed: {}", message)),
+                        Some(format!(
+                            "Local output failed ({}): {}",
+                            player_runtime.lock().unwrap().output,
+                            message
+                        )),
                     );
                 }
             }
