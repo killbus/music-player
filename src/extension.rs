@@ -128,6 +128,7 @@ pub async fn init(
         readme: String::new(),
         entry: "plugin.wasm".to_owned(),
         capabilities: capabilities.clone(),
+        source_api_version: None,
         permissions: Permissions::default(),
     };
     std::fs::write(dir.join("plugin.toml"), manifest_toml(&manifest))?;
@@ -380,6 +381,10 @@ fn build_command(language: &str) -> &'static str {
 /// Serialize a manifest as commented TOML — friendlier to edit than the
 /// round-tripped output `toml::to_string` would give.
 fn manifest_toml(manifest: &Manifest) -> String {
+    let source_api_version = manifest
+        .source_api_version
+        .map(|version| format!("sourceApiVersion = {version}\n"))
+        .unwrap_or_default();
     let capabilities = manifest
         .capabilities
         .iter()
@@ -410,6 +415,7 @@ entry = "{entry}"
 
 # The host calls only the exports these cover.
 capabilities = [{capabilities}]
+{source_api_version}
 
 [permissions]
 # Hosts this extension may reach. Empty means no network at all.
@@ -533,6 +539,7 @@ mod tests {
             readme: String::new(),
             entry: "plugin.wasm".into(),
             capabilities: vec![Capability::Metadata, Capability::Source],
+            source_api_version: None,
             permissions: Permissions::default(),
         };
         let dir = tempfile::tempdir().unwrap();
@@ -546,6 +553,8 @@ mod tests {
         // Nothing is granted by default.
         assert!(loaded.permissions.allowed_hosts.is_empty());
         assert!(!loaded.permissions.library_read);
+        // Scaffolds stay on the legacy source ABI until they declare one.
+        assert_eq!(loaded.source_api_version, None);
     }
 
     #[test]
@@ -564,6 +573,7 @@ mod tests {
             readme: String::new(),
             entry: "plugin.wasm".into(),
             capabilities: vec![Capability::Predicates],
+            source_api_version: None,
             permissions: Permissions::default(),
         };
         let readme = readme(&manifest, "rust", true);
