@@ -115,10 +115,14 @@ fn open_fifo(path: &std::path::Path) -> io::Result<Box<dyn Write + Send>> {
         .write(true)
         .custom_flags(libc::O_NONBLOCK)
         .open(path)?;
-    if !f.metadata()?.file_type().is_fifo() {
+    // A regular file would open fine yet never behave like a stream (a reader
+    // sees EOF at once), which is the mistake this guard catches. Character
+    // devices such as `/dev/null` are a legitimate discard sink.
+    let file_type = f.metadata()?.file_type();
+    if !file_type.is_fifo() && !file_type.is_char_device() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "output path is not a FIFO",
+            "output path is neither a FIFO nor a character device",
         ));
     }
     Ok(Box::new(f))
