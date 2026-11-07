@@ -8549,7 +8549,6 @@ dependencies = [
  "music-player-migration",
  "music-player-settings",
  "music-player-storage",
- "music-player-settings",
  "music-player-types",
  "reqwest 0.12.28",
  "rockbox-metadata",
@@ -8643,7 +8642,6 @@ dependencies = [
  "music-player-entity",
  "music-player-migration",
  "music-player-rsql",
- "music-player-settings",
  "music-player-settings",
  "music-player-types",
  "reqwest 0.12.28",
@@ -11494,10 +11492,9 @@ dependencies = [
 [[package]]
 name = "rockbox-playback"
 version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21c1a1cfeee1e849b5f71699636a731ff04c61b7edbc5624b1f6af9528a884ee"
 dependencies = [
  "cpal",
+ "libc",
  "quick-xml 0.37.5",
  "reqwest 0.12.28",
  "rockbox-codecs",
