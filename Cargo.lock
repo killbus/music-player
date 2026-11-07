@@ -8676,6 +8676,7 @@ dependencies = [
  "music-player-discovery",
  "music-player-settings",
  "rockbox-metadata",
+ "serde",
  "upnp-client",
  "url",
 ]
