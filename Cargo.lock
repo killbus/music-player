@@ -8252,6 +8252,7 @@ name = "music-player"
 version = "0.4.7"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "crossterm 0.29.0",
  "dirs",
@@ -8646,6 +8647,7 @@ dependencies = [
  "music-player-analysis",
  "music-player-analytics",
  "music-player-entity",
+ "music-player-extensions",
  "music-player-migration",
  "music-player-playback",
  "music-player-provider",
@@ -8732,7 +8734,11 @@ version = "0.4.7"
 dependencies = [
  "atlist-rs",
  "music-player-entity",
+ "music-player-types",
  "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]

@@ -90,6 +90,12 @@ fn boot() {
         db
     });
 
+    let sources = runtime
+        .block_on(async {
+            music_player_playback::source_resolver::SourceResolver::for_daemon(db.clone())
+        })
+        .expect("initialize source runtime");
+
     let peer_map: PeerMap = Arc::new(sync::Mutex::new(HashMap::new()));
     let tracklist = Arc::new(sync::Mutex::new(Tracklist::new_empty()));
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -99,7 +105,7 @@ fn boot() {
     // The engine handle is not Send — Player::new parks it on its own
     // dedicated current-thread runtime internally.
     let broadcast_peers = Arc::clone(&peer_map);
-    let (_player, _) = Player::new(
+    let (player, _) = Player::with_source_resolver(
         move |event| match event {
             PlayerEvent::CurrentTrack {
                 track,
@@ -139,7 +145,9 @@ fn boot() {
         Arc::clone(&cmd_tx),
         cmd_rx,
         Arc::clone(&tracklist),
+        sources.clone(),
     );
+    let player_runtime = player.runtime();
 
     // Library scan: initial (only when the library is empty) + periodic.
     std::thread::spawn(|| {
@@ -194,6 +202,7 @@ fn boot() {
         let cmd_tx = Arc::clone(&cmd_tx);
         let peer_map = Arc::clone(&peer_map);
         let db = db.clone();
+        let sources = sources.clone();
         let grpc_providers = Arc::clone(&providers);
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -201,7 +210,9 @@ fn boot() {
                 .build()
                 .unwrap();
             if let Err(e) = runtime.block_on(
-                MusicPlayerServer::new(tracklist, cmd_tx, peer_map, db, grpc_providers).start(),
+                MusicPlayerServer::new(tracklist, cmd_tx, peer_map, db, grpc_providers)
+                    .with_source_resolver(sources)
+                    .start(),
             ) {
                 tracing::error!("gRPC server failed: {e}");
             }
@@ -214,6 +225,7 @@ fn boot() {
         let cmd_tx = Arc::clone(&cmd_tx);
         let peer_map = Arc::clone(&peer_map);
         let db = db.clone();
+        let sources = sources.clone();
         let ws_providers = Arc::clone(&providers);
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -221,7 +233,9 @@ fn boot() {
                 .build()
                 .unwrap();
             if let Err(e) = runtime.block_on(
-                MusicPlayerServer::new(tracklist, cmd_tx, peer_map, db, ws_providers).start_ws(),
+                MusicPlayerServer::new(tracklist, cmd_tx, peer_map, db, ws_providers)
+                    .with_source_resolver(sources)
+                    .start_ws(),
             ) {
                 tracing::error!("websocket server failed: {e}");
             }
@@ -229,7 +243,14 @@ fn boot() {
     }
 
     // Webui (GraphQL + /covers/ album art) — parks this thread forever.
-    if let Err(e) = runtime.block_on(start_webui(cmd_tx, tracklist, providers)) {
+    if let Err(e) = runtime.block_on(start_webui(
+        cmd_tx,
+        tracklist,
+        providers,
+        db,
+        sources,
+        player_runtime,
+    )) {
         tracing::error!("webui failed: {e}");
     }
 }

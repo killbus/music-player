@@ -1,3 +1,6 @@
+// The expanded GraphQL mutation future exceeds the default layout query depth.
+#![recursion_limit = "256"]
+
 #[cfg(test)]
 mod tests;
 
@@ -21,6 +24,7 @@ use music_player_graphql::{
     MusicPlayerSchema,
 };
 use music_player_playback::player::PlayerCommand;
+use music_player_playback::player::PlayerRuntime;
 use music_player_provider::ProviderState;
 use music_player_renderer::CurrentReceiverDevice;
 use music_player_settings::{get_application_directory, read_settings, Settings};
@@ -132,6 +136,9 @@ pub async fn start_webui(
     // Where the library screens read from. Shared with the gRPC server so the
     // two API surfaces cannot disagree about which server is current.
     providers: Arc<ProviderState>,
+    db: Database,
+    sources: music_player_playback::source_resolver::SourceResolver,
+    player_runtime: PlayerRuntime,
 ) -> std::io::Result<()> {
     let config = read_settings().unwrap();
     let settings = config.try_deserialize::<Settings>().unwrap();
@@ -140,7 +147,6 @@ pub async fn start_webui(
 
     let devices = scan_devices().await.unwrap();
     let receiver_device = Arc::new(Mutex::new(CurrentReceiverDevice::new()));
-    let db = Database::new().await;
     let searcher = Arc::new(Searcher::new(db.get_connection().clone()));
     let http_db = db.clone();
     let schema = Schema::build(
@@ -149,12 +155,14 @@ pub async fn start_webui(
         Subscription::default(),
     )
     .data(db)
+    .data(sources)
     .data(cmd_tx)
     .data(tracklist)
     .data(devices)
     .data(receiver_device)
     .data(Arc::clone(&providers))
     .data(searcher)
+    .data(player_runtime)
     .finish();
     println!("Starting webui at {}", addr.bright_green());
 
@@ -181,6 +189,8 @@ pub async fn start_webui(
             .route("/artists", web::get().to(index_spa))
             .route("/albums", web::get().to(index_spa))
             .route("/radio", web::get().to(index_spa))
+            .route("/source-accounts", web::get().to(index_spa))
+            .route("/source-accounts/{_:.*}", web::get().to(index_spa))
             .route("/artists/{_:.*}", web::get().to(index_spa))
             .route("/albums/{_:.*}", web::get().to(index_spa))
             .route("/folders/{_:.*}", web::get().to(index_spa))
