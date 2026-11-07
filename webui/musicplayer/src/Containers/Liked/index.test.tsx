@@ -119,7 +119,7 @@ describe("LikedPage", () => {
     withLikedTracks([TRACK]);
     let queued: unknown;
     server.use(
-      graphql.mutation("PlayNext", ({ variables }) => {
+      graphql.mutation("PlayTrack", ({ variables }) => {
         queued = variables;
         return HttpResponse.json({ data: { playNext: true } });
       })

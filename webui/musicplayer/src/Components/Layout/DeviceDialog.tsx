@@ -24,34 +24,19 @@ const KIND: Record<string, { label: string; icon: IconComponent }> = {
  */
 const DeviceDialog = ({ isOpen, onClose }: DeviceDialogProps) => {
   const {
-    devices,
     castDevices,
-    currentDevice,
     currentCastDevice,
-    connectToDevice,
-    disconnectFromDevice,
     connectToCastDevice,
     disconnectFromCastDevice,
   } = useDevices();
 
-  // Cast targets and peer daemons are both places the sound can come out of,
-  // so they are one list rather than two.
-  const rows = [
-    ...castDevices.map((device) => ({
-      ...device,
-      cast: true,
-      active: currentCastDevice?.id === device.id,
-    })),
-    ...devices
-      .filter((device) => !castDevices.some((cast) => cast.id === device.id))
-      .map((device) => ({
-        ...device,
-        cast: false,
-        active: currentDevice?.id === device.id,
-      })),
-  ];
+  const rows = castDevices.map((device) => ({
+    ...device,
+    cast: true,
+    active: currentCastDevice?.id === device.id,
+  }));
 
-  const playingElsewhere = !!currentCastDevice || !!currentDevice;
+  const playingElsewhere = !!currentCastDevice;
 
   return (
     <Dialog
@@ -66,7 +51,6 @@ const DeviceDialog = ({ isOpen, onClose }: DeviceDialogProps) => {
             variant="outline"
             onClick={() => {
               if (currentCastDevice) disconnectFromCastDevice();
-              if (currentDevice) disconnectFromDevice();
               onClose();
             }}
           >
@@ -76,13 +60,12 @@ const DeviceDialog = ({ isOpen, onClose }: DeviceDialogProps) => {
       }
     >
       <ul className="flex flex-col gap-1 py-1">
-          {/* This machine is always an option, and is where it starts. */}
+        {/* This machine is always an option, and is where it starts. */}
           <li>
             <button
               type="button"
               onClick={() => {
                 if (currentCastDevice) disconnectFromCastDevice();
-                if (currentDevice) disconnectFromDevice();
                 onClose();
               }}
               className={cn(
@@ -115,14 +98,17 @@ const DeviceDialog = ({ isOpen, onClose }: DeviceDialogProps) => {
               label: device.type,
               icon: Icons.device,
             };
+            const label =
+              device.type === "music-player"
+                ? "another music-player daemon"
+                : kind.label;
             const Icon = kind.icon;
             return (
               <li key={`${device.cast ? "cast" : "mp"}-${device.id}`}>
                 <button
                   type="button"
                   onClick={() => {
-                    if (device.cast) connectToCastDevice({ id: device.id });
-                    else connectToDevice({ id: device.id });
+                    connectToCastDevice({ id: device.id });
                     onClose();
                   }}
                   className={cn(
@@ -139,7 +125,7 @@ const DeviceDialog = ({ isOpen, onClose }: DeviceDialogProps) => {
                       {device.name}
                     </span>
                     <span className="block truncate text-[11px] text-muted">
-                      {kind.label}
+                      {label}
                     </span>
                   </span>
                   {device.active && (
