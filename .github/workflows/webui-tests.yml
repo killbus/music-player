@@ -5,7 +5,7 @@ name: webui tests
 # the filter so a change to this file is checked by the run it describes.
 on:
   push:
-    branches: ["master"]
+    branches: ["master", "migration/upstream-0.4.7"]
     paths:
       - "webui/musicplayer/**"
       - ".github/workflows/webui-tests.yml"
