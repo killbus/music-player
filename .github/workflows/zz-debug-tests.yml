@@ -1,0 +1,135 @@
+name: zz debug tests
+
+# Temporary branch-only diagnostic. It runs the same Dagger coverage function
+# the "tests" workflow uses, captures the log, and republishes the failing
+# section as workflow annotations because unauthenticated CI log download is
+# not available in this environment. Delete with the debug branch.
+
+on:
+  push:
+    branches: ["debug/tests"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    name: diagnose rust-coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Dagger
+        uses: ./.github/actions/setup-dagger
+
+      - name: Run coverage with captured log
+        run: |
+          set +e
+          NO_COLOR=1 dagger --progress logs -v api call -m .dagger/ci rust-coverage --source . export --path artifacts/lcov.info > /tmp/dagger.log 2>&1
+          rc=$?
+          echo "dagger exit code: $rc"
+          echo "log lines: $(wc -l < /tmp/dagger.log)"
+          echo "log bytes: $(wc -c < /tmp/dagger.log)"
+          grep -n 'test result:' /tmp/dagger.log | tail -n 80 > /tmp/results.txt || true
+          sed -n '/^failures:$/,/^test result:/p' /tmp/dagger.log > /tmp/fail.txt || true
+          grep -n -E 'error(\[E[0-9]+\])?:|^error:|FAILED|panicked at|assertion|left:|right:|cannot find|no method named|mismatched types|unresolved import|expected .*, found' /tmp/dagger.log | tail -n 400 > /tmp/key.txt || true
+          tail -c 6000 /tmp/dagger.log > /tmp/tail.txt
+          head -c 3000 /tmp/dagger.log > /tmp/head.txt
+          wc -c /tmp/results.txt /tmp/fail.txt /tmp/key.txt /tmp/tail.txt /tmp/head.txt
+          mkdir -p /tmp/chunks
+          rm -f /tmp/chunks/*
+          for pair in results:results fail:fail key:key tail:tail head:head; do
+            name=${pair%%:*}
+            file=${pair##*:}
+            split -b 4500 -d -a 2 "/tmp/$file.txt" "/tmp/chunks/$name-" 2>/dev/null || true
+          done
+          ls -la /tmp/chunks
+          exit 0
+
+      - name: Annotate results
+        run: |
+          emit() {
+            label="$1"
+            file="$2"
+            msg=$(sed -e 's/%/%25/g' -e 's/\r//g' "$file" | sed -e ':a' -e 'N' -e '$!ba' -e 's/\n/%0A/g' -e 's/::/>:/g')
+            echo "::warning title=$label::$msg"
+          }
+          for f in /tmp/chunks/results-*; do [ -e "$f" ] || continue; emit "res-$(basename "$f")" "$f"; done
+          for f in /tmp/chunks/head-*; do [ -e "$f" ] || continue; emit "head-$(basename "$f")" "$f"; done
+
+      - name: Annotate failures 1
+        run: |
+          emit() {
+            label="$1"
+            file="$2"
+            msg=$(sed -e 's/%/%25/g' -e 's/\r//g' "$file" | sed -e ':a' -e 'N' -e '$!ba' -e 's/\n/%0A/g' -e 's/::/>:/g')
+            echo "::error title=$label::$msg"
+          }
+          n=0
+          for f in /tmp/chunks/fail-*; do
+            [ -e "$f" ] || continue
+            n=$((n+1))
+            [ $n -le 4 ] || break
+            emit "fail-$(basename "$f")" "$f"
+          done
+
+      - name: Annotate failures 2
+        run: |
+          emit() {
+            label="$1"
+            file="$2"
+            msg=$(sed -e 's/%/%25/g' -e 's/\r//g' "$file" | sed -e ':a' -e 'N' -e '$!ba' -e 's/\n/%0A/g' -e 's/::/>:/g')
+            echo "::error title=$label::$msg"
+          }
+          n=0
+          for f in /tmp/chunks/fail-*; do
+            [ -e "$f" ] || continue
+            n=$((n+1))
+            [ $n -gt 4 ] || continue
+            [ $n -le 10 ] || break
+            emit "fail-$(basename "$f")" "$f"
+          done
+
+      - name: Annotate key lines 1
+        run: |
+          emit() {
+            label="$1"
+            file="$2"
+            msg=$(sed -e 's/%/%25/g' -e 's/\r//g' "$file" | sed -e ':a' -e 'N' -e '$!ba' -e 's/\n/%0A/g' -e 's/::/>:/g')
+            echo "::error title=$label::$msg"
+          }
+          n=0
+          for f in /tmp/chunks/key-*; do
+            [ -e "$f" ] || continue
+            n=$((n+1))
+            [ $n -le 4 ] || break
+            emit "key-$(basename "$f")" "$f"
+          done
+
+      - name: Annotate key lines 2
+        run: |
+          emit() {
+            label="$1"
+            file="$2"
+            msg=$(sed -e 's/%/%25/g' -e 's/\r//g' "$file" | sed -e ':a' -e 'N' -e '$!ba' -e 's/\n/%0A/g' -e 's/::/>:/g')
+            echo "::error title=$label::$msg"
+          }
+          n=0
+          for f in /tmp/chunks/key-*; do
+            [ -e "$f" ] || continue
+            n=$((n+1))
+            [ $n -gt 4 ] || continue
+            [ $n -le 10 ] || break
+            emit "key-$(basename "$f")" "$f"
+          done
+
+      - name: Annotate log tail
+        run: |
+          emit() {
+            label="$1"
+            file="$2"
+            msg=$(sed -e 's/%/%25/g' -e 's/\r//g' "$file" | sed -e ':a' -e 'N' -e '$!ba' -e 's/\n/%0A/g' -e 's/::/>:/g')
+            echo "::warning title=$label::$msg"
+          }
+          for f in /tmp/chunks/tail-*; do [ -e "$f" ] || continue; emit "tail-$(basename "$f")" "$f"; done
