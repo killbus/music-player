@@ -80,6 +80,8 @@ pub enum Phase {
     Streaming,
     Failed,
     EndUnconfirmed,
+    /// Normal finite stream end for queue navigation, not listening completion.
+    Ended,
 }
 
 /// Evidence for the beginning of the returned audio, separate from the requested
@@ -194,6 +196,10 @@ pub trait SessionControl {
     /// The input reader and decoder have both finished releasing their resources.
     /// This does not imply that output is drained or media is complete.
     fn input_released(&self) -> bool;
+    /// Clean EOF/decoder exit and all PCM accepted by this generation's output.
+    fn clean_end(&self) -> bool {
+        false
+    }
 }
 impl SessionControl for StreamSession {
     fn cancel(&self) {
@@ -212,6 +218,9 @@ impl SessionControl for StreamSession {
         let snapshot = self.snapshot();
         snapshot.reader_released && snapshot.decoder_joined
     }
+    fn clean_end(&self) -> bool {
+        StreamSession::clean_end(self)
+    }
 }
 
 struct Active<S: SessionControl> {
@@ -222,6 +231,41 @@ struct Active<S: SessionControl> {
     cancelled: bool,
 }
 impl<S: SessionControl> Active<S> {
+    fn ended(&self, capabilities: Option<PlaybackCapabilities>) -> bool {
+        let Some(PlaybackCapabilities {
+            timeline: Timeline::Finite { duration_ticks },
+            ..
+        }) = capabilities
+        else {
+            return false;
+        };
+        if !self.session.clean_end() {
+            return false;
+        }
+        let duration = Duration::from_secs(duration_ticks / 10_000_000)
+            + Duration::from_nanos((duration_ticks % 10_000_000) * 100);
+        let start = match self.start {
+            StartPosition::RequestedOnly => self.requested_start,
+            StartPosition::Calibrated { offset, .. } => offset,
+        };
+        let Some(remaining) = duration.checked_sub(start).filter(|value| !value.is_zero()) else {
+            return false;
+        };
+        let output = self.session.output();
+        if output.generation != self.session.generation() || output.frames == 0 {
+            return false;
+        }
+        let Some(delivered) = output.duration() else {
+            return false;
+        };
+        // A short, otherwise clean server response must not skip most of a
+        // programme. This bounded timing guard is NOT an integrity witness.
+        let tolerance = (remaining / 100)
+            .clamp(Duration::from_millis(100), Duration::from_secs(2))
+            .min(remaining / 10);
+        delivered.abs_diff(remaining) <= tolerance
+    }
+
     fn cancel(&mut self) {
         if !self.cancelled {
             self.cancelled = true;
@@ -459,6 +503,7 @@ impl<K: Clone, S: SessionControl> Coordinator<K, S> {
                 self.capture_and_cancel();
                 Phase::Failed
             }
+            StreamPhase::EndUnconfirmed if active.ended(self.capabilities) => Phase::Ended,
             StreamPhase::EndUnconfirmed => Phase::EndUnconfirmed,
             _ if self
                 .position
