@@ -331,7 +331,8 @@ impl Emby {
         let mut items = Vec::new();
         let mut seen = HashSet::new();
         query.push(("EnableTotalRecordCount", "true".into()));
-        query.push(("SortBy", "SortName,Id".into()));
+        // Emby can reject the Id sort key for season children with HTTP 500.
+        query.push(("SortBy", "SortName".into()));
         loop {
             let limit = wanted
                 .map(|n| n - items.len())
