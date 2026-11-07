@@ -100,3 +100,4 @@ version = "0.4.7"
 
 [dev-dependencies]
 tempfile = "3"
+music-player-extensions = { path = "../extensions", version = "0.4.7" }

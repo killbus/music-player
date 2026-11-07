@@ -2,6 +2,7 @@ use std::{env, sync::Arc};
 
 use async_graphql::Schema;
 use music_player_playback::player::PlayerCommand;
+use music_player_playback::player::{PlayerRuntime, PlayerRuntimePhase, PlayerRuntimeSnapshot};
 use music_player_renderer::CurrentReceiverDevice;
 use music_player_storage::{searcher::Searcher, Database};
 use music_player_tracklist::Tracklist;
@@ -16,7 +17,9 @@ use crate::{
     MusicPlayerSchema,
 };
 
+pub mod devices;
 pub mod library;
+mod media;
 pub mod objects;
 pub mod playback;
 pub mod playlist;
@@ -28,6 +31,7 @@ pub async fn setup_schema() -> (
     Arc<std::sync::Mutex<UnboundedSender<PlayerCommand>>>,
     Arc<std::sync::Mutex<UnboundedReceiver<PlayerCommand>>>,
     Arc<std::sync::Mutex<Tracklist>>,
+    PlayerRuntime,
 ) {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let cmd_tx = Arc::new(std::sync::Mutex::new(cmd_tx));
@@ -58,6 +62,11 @@ pub async fn setup_schema() -> (
     ensure_test_library().await;
 
     let db = Database::new().await;
+    let player_runtime = Arc::new(std::sync::Mutex::new(PlayerRuntimeSnapshot {
+        output: "test-output".to_string(),
+        phase: PlayerRuntimePhase::Ready,
+        error: None,
+    }));
     let searcher = Arc::new(Searcher::new(db.get_connection().clone()));
     (
         Schema::build(
@@ -65,6 +74,11 @@ pub async fn setup_schema() -> (
             Mutation::default(),
             Subscription::default(),
         )
+        .data(music_player_playback::source_resolver::SourceResolver::new(
+            db.clone(),
+            "graphql-library-fixture".into(),
+            true,
+        ))
         .data(db)
         .data(Arc::clone(&cmd_tx))
         .data(Arc::clone(&tracklist))
@@ -72,10 +86,12 @@ pub async fn setup_schema() -> (
         .data(Arc::clone(&providers))
         .data(Arc::clone(&receiver_device))
         .data(Arc::clone(&searcher))
+        .data(Arc::clone(&player_runtime))
         .finish(),
         Arc::clone(&cmd_tx),
         Arc::clone(&cmd_rx),
         Arc::clone(&tracklist),
+        player_runtime,
     )
 }
 

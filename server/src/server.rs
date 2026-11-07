@@ -2,32 +2,39 @@ use futures_channel::mpsc::{unbounded, UnboundedSender};
 use futures_util::{future, pin_mut, stream::TryStreamExt, StreamExt};
 use std::collections::HashMap;
 use std::net::SocketAddr;
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::sync::{self, Arc};
 
-use music_player_playback::player::PlayerCommand;
+use music_player_playback::{player::PlayerCommand, source_resolver::SourceResolver};
 use music_player_provider::ProviderState;
 use music_player_settings::{read_settings, Settings};
 use music_player_storage::Database;
 use music_player_tracklist::Tracklist as TracklistState;
 use owo_colors::OwoColorize;
-use tokio::net::{TcpListener, TcpStream, UnixListener};
+#[cfg(unix)]
+use tokio::net::UnixListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::UnboundedSender as TokioUnboundedSender;
+#[cfg(unix)]
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
 use tungstenite::Message;
 
 use crate::{
-    addons::Addons, core::Core, history::History, library::Library, mixer::Mixer,
-    playback::Playback, playlist::Playlist, servers::Servers, tracklist::Tracklist,
+    addons::Addons, core::Core, extensions::Extensions, history::History, library::Library,
+    mixer::Mixer, playback::Playback, playlist::Playlist, servers::Servers,
+    source_accounts::SourceAccounts, tracklist::Tracklist,
 };
 
 use crate::api::music::v1alpha1::{
     addons_service_server::AddonsServiceServer, analysis_service_server::AnalysisServiceServer,
     analytics_service_server::AnalyticsServiceServer, core_service_server::CoreServiceServer,
+    extensions_service_server::ExtensionsServiceServer,
     history_service_server::HistoryServiceServer, library_service_server::LibraryServiceServer,
     mixer_service_server::MixerServiceServer, playback_service_server::PlaybackServiceServer,
     playlist_service_server::PlaylistServiceServer, servers_service_server::ServersServiceServer,
+    source_accounts_service_server::SourceAccountsServiceServer,
     tracklist_service_server::TracklistServiceServer,
 };
 
@@ -45,6 +52,7 @@ type PeerMap = Arc<sync::Mutex<HashMap<SocketAddr, Tx>>>;
 
 pub struct MusicPlayerServer {
     db: Database,
+    sources: SourceResolver,
     tracklist: Arc<std::sync::Mutex<TracklistState>>,
     cmd_tx: Arc<std::sync::Mutex<TokioUnboundedSender<PlayerCommand>>>,
     peer_map: PeerMap,
@@ -65,7 +73,9 @@ impl MusicPlayerServer {
         db: Database,
         providers: Arc<ProviderState>,
     ) -> Self {
+        let sources = SourceResolver::from_settings(db.clone());
         Self {
+            sources,
             db,
             tracklist,
             cmd_tx,
@@ -74,6 +84,12 @@ impl MusicPlayerServer {
             auto_dj: Default::default(),
             analysis_progress: Default::default(),
         }
+    }
+
+    /// Inject once before starting either TCP or Unix services.
+    pub fn with_source_resolver(mut self, sources: SourceResolver) -> Self {
+        self.sources = sources;
+        self
     }
 
     /// The analysis service, and the auto-DJ state it shares with the loop.
@@ -114,11 +130,19 @@ impl MusicPlayerServer {
             .add_service(AddonsServiceServer::new(Addons::new(self.db.clone())))
             .add_service(CoreServiceServer::new(Core::default()))
             .add_service(HistoryServiceServer::new(History::new(self.db.clone())))
-            .add_service(LibraryServiceServer::new(Library::new(
-                self.db.clone(),
-                Arc::clone(&self.providers),
-                Arc::clone(&self.tracklist),
-            )))
+            .add_service(
+                ExtensionsServiceServer::new(Extensions::new(self.sources.clone()))
+                    .max_decoding_message_size(crate::LIBRARY_MESSAGE_LIMIT)
+                    .max_encoding_message_size(crate::LIBRARY_MESSAGE_LIMIT),
+            )
+            .add_service(LibraryServiceServer::new(
+                Library::new(
+                    self.db.clone(),
+                    Arc::clone(&self.providers),
+                    Arc::clone(&self.tracklist),
+                )
+                .with_source_resolver(self.sources.clone()),
+            ))
             .add_service(MixerServiceServer::new(Mixer::new(Arc::clone(
                 &self.cmd_tx,
             ))))
@@ -130,16 +154,27 @@ impl MusicPlayerServer {
                 self.db.clone(),
                 Arc::clone(&self.providers),
             )))
+            .add_service(
+                SourceAccountsServiceServer::new(SourceAccounts::new(self.sources.clone()))
+                    .max_decoding_message_size(crate::LIBRARY_MESSAGE_LIMIT)
+                    .max_encoding_message_size(crate::LIBRARY_MESSAGE_LIMIT),
+            )
             .add_service(ServersServiceServer::new(Servers::new(
                 self.db.clone(),
                 Arc::clone(&self.providers),
                 Arc::clone(&self.tracklist),
             )))
-            .add_service(TracklistServiceServer::new(Tracklist::new(
-                Arc::clone(&self.tracklist),
-                Arc::clone(&self.cmd_tx),
-                self.db.clone(),
-            )))
+            .add_service(
+                TracklistServiceServer::new(
+                    Tracklist::new(
+                        Arc::clone(&self.tracklist),
+                        Arc::clone(&self.cmd_tx),
+                        self.db.clone(),
+                    )
+                    .with_source_resolver(self.sources.clone()),
+                )
+                .max_decoding_message_size(crate::LIBRARY_MESSAGE_LIMIT),
+            )
             .add_service(AnalysisServiceServer::new(self.analysis()))
             .add_service(AnalyticsServiceServer::new(
                 crate::analytics::Analytics::new(self.db.clone()),
@@ -149,6 +184,7 @@ impl MusicPlayerServer {
         Ok(())
     }
 
+    #[cfg(unix)]
     pub async fn start_over_unix_domain_socket(
         &self,
         path: &str,
@@ -171,11 +207,19 @@ impl MusicPlayerServer {
             .add_service(AddonsServiceServer::new(Addons::new(self.db.clone())))
             .add_service(CoreServiceServer::new(Core::default()))
             .add_service(HistoryServiceServer::new(History::new(self.db.clone())))
-            .add_service(LibraryServiceServer::new(Library::new(
-                self.db.clone(),
-                Arc::clone(&self.providers),
-                Arc::clone(&self.tracklist),
-            )))
+            .add_service(
+                ExtensionsServiceServer::new(Extensions::new(self.sources.clone()))
+                    .max_decoding_message_size(crate::LIBRARY_MESSAGE_LIMIT)
+                    .max_encoding_message_size(crate::LIBRARY_MESSAGE_LIMIT),
+            )
+            .add_service(LibraryServiceServer::new(
+                Library::new(
+                    self.db.clone(),
+                    Arc::clone(&self.providers),
+                    Arc::clone(&self.tracklist),
+                )
+                .with_source_resolver(self.sources.clone()),
+            ))
             .add_service(MixerServiceServer::new(Mixer::new(Arc::clone(
                 &self.cmd_tx,
             ))))
@@ -187,16 +231,27 @@ impl MusicPlayerServer {
                 self.db.clone(),
                 Arc::clone(&self.providers),
             )))
+            .add_service(
+                SourceAccountsServiceServer::new(SourceAccounts::new(self.sources.clone()))
+                    .max_decoding_message_size(crate::LIBRARY_MESSAGE_LIMIT)
+                    .max_encoding_message_size(crate::LIBRARY_MESSAGE_LIMIT),
+            )
             .add_service(ServersServiceServer::new(Servers::new(
                 self.db.clone(),
                 Arc::clone(&self.providers),
                 Arc::clone(&self.tracklist),
             )))
-            .add_service(TracklistServiceServer::new(Tracklist::new(
-                Arc::clone(&self.tracklist),
-                Arc::clone(&self.cmd_tx),
-                self.db.clone(),
-            )))
+            .add_service(
+                TracklistServiceServer::new(
+                    Tracklist::new(
+                        Arc::clone(&self.tracklist),
+                        Arc::clone(&self.cmd_tx),
+                        self.db.clone(),
+                    )
+                    .with_source_resolver(self.sources.clone()),
+                )
+                .max_decoding_message_size(crate::LIBRARY_MESSAGE_LIMIT),
+            )
             .add_service(AnalysisServiceServer::new(self.analysis()))
             .add_service(AnalyticsServiceServer::new(
                 crate::analytics::Analytics::new(self.db.clone()),
