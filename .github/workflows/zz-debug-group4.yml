@@ -1,0 +1,50 @@
+name: zz debug group4
+
+# Temporary branch-only diagnostic. It runs the same Dagger coverage function
+# the "tests" workflow uses, keeps the output, and republishes the failing part
+# as workflow annotations because unauthenticated CI log download is not
+# available in this environment. Delete with the debug branch.
+
+on:
+  push:
+    branches: ["debug/group4"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    name: diagnose rust-coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Dagger
+        uses: ./.github/actions/setup-dagger
+
+      - name: Run coverage with captured log
+        run: |
+          set +e
+          NO_COLOR=1 dagger --progress logs -v api call -m .dagger/ci rust-coverage --source . export --path artifacts/lcov.info > /tmp/dagger.log 2>&1
+          rc=$?
+          echo "dagger exit code: $rc"
+          echo "log lines: $(wc -l < /tmp/dagger.log)"
+          echo "log bytes: $(wc -c < /tmp/dagger.log)"
+          ls -la artifacts 2>/dev/null || true
+          exit 0
+
+      - name: Report captured log
+        run: |
+          log=/tmp/dagger.log
+          emit() {
+            title="$1"
+            file="$2"
+            msg=$(sed -e 's/%/%25/g' -e 's/\r//g' "$file" | sed -e ':a' -e 'N' -e '$!ba' -e 's/\n/%0A/g' -e 's/::/>:/g')
+            echo "::error title=$title::$msg"
+          }
+          grep -n -E 'error(\[E[0-9]+\])?:|^error|panicked at|failures:|test result: FAILED|FAILED|did not complete successfully|exit code|thread .* panicked|cannot find|unresolved|no method|expected' "$log" | tail -n 400 > /tmp/key.txt || true
+          echo "key lines: $(wc -l < /tmp/key.txt)"
+          emit group4-key /tmp/key.txt
+          tail -c 24000 "$log" > /tmp/tail.txt
+          emit group4-tail /tmp/tail.txt
