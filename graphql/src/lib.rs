@@ -11,7 +11,7 @@ use futures_util::StreamExt;
 use music_player_discovery::{discover, SERVICE_NAME};
 use music_player_entity::track as track_entity;
 use music_player_playback::{
-    player::{normalize_queue, PlayerCommand},
+    player::{normalize_queue, PlayerCommand, PlayerRuntime, PlayerRuntimePhase},
     source_resolver::SourceResolver,
 };
 use music_player_renderer::Player;
@@ -44,6 +44,38 @@ pub(crate) fn source_resolver<'a>(
 ) -> async_graphql::Result<&'a SourceResolver> {
     ctx.data::<SourceResolver>()
         .map_err(|_| async_graphql::Error::new("Shared source resolver is not configured"))
+}
+
+/// The shared local-output readiness state. Remote receiver paths must not
+/// consult this gate.
+pub(crate) fn local_player_ready(
+    runtime: Option<&PlayerRuntime>,
+) -> async_graphql::Result<PlayerRuntime> {
+    let runtime = runtime.cloned().ok_or_else(|| {
+        async_graphql::Error::new(
+            "Local player runtime is not configured; this server cannot safely route local commands",
+        )
+    })?;
+
+    let snapshot = runtime.lock().unwrap().clone();
+    match snapshot.phase {
+        PlayerRuntimePhase::Ready => Ok(runtime),
+        PlayerRuntimePhase::Starting => Err(async_graphql::Error::new(format!(
+            "Local output \"{}\" is still starting or waiting for a listener. Check playerRuntime or audio_output.",
+            snapshot.output
+        ))),
+        PlayerRuntimePhase::Failed => Err(async_graphql::Error::new(format!(
+            "Local output \"{}\" failed to start: {}",
+            snapshot.output,
+            snapshot.error.as_deref().unwrap_or("unknown error")
+        ))),
+    }
+}
+
+pub(crate) fn require_local_player_ready(
+    ctx: &async_graphql::Context<'_>,
+) -> async_graphql::Result<PlayerRuntime> {
+    local_player_ready(ctx.data::<PlayerRuntime>().ok())
 }
 
 const MEDIA_RENDERER: &str = "urn:schemas-upnp-org:device:MediaRenderer";

@@ -7,7 +7,7 @@ use super::setup_schema;
 
 #[tokio::test]
 async fn tracks() {
-    let (schema, cmd_tx, cmd_rx, tracklist) = setup_schema().await;
+    let (schema, cmd_tx, cmd_rx, tracklist, player_runtime) = setup_schema().await;
     let (_, _) = Player::new(
         |_| {},
         Arc::clone(&cmd_tx),
@@ -52,7 +52,7 @@ async fn tracks() {
 
 #[tokio::test]
 async fn artists() {
-    let (schema, cmd_tx, cmd_rx, tracklist) = setup_schema().await;
+    let (schema, cmd_tx, cmd_rx, tracklist, player_runtime) = setup_schema().await;
     let (_, _) = Player::new(
         |_| {},
         Arc::clone(&cmd_tx),
@@ -87,7 +87,7 @@ async fn artists() {
 
 #[tokio::test]
 async fn albums() {
-    let (schema, cmd_tx, cmd_rx, tracklist) = setup_schema().await;
+    let (schema, cmd_tx, cmd_rx, tracklist, player_runtime) = setup_schema().await;
     let (_, _) = Player::new(
         |_| {},
         Arc::clone(&cmd_tx),
@@ -126,7 +126,7 @@ async fn albums() {
 
 #[tokio::test]
 async fn track() {
-    let (schema, cmd_tx, cmd_rx, tracklist) = setup_schema().await;
+    let (schema, cmd_tx, cmd_rx, tracklist, player_runtime) = setup_schema().await;
     let (_, _) = Player::new(
         |_| {},
         Arc::clone(&cmd_tx),
@@ -176,7 +176,7 @@ async fn track() {
 
 #[tokio::test]
 async fn artist() {
-    let (schema, cmd_tx, cmd_rx, tracklist) = setup_schema().await;
+    let (schema, cmd_tx, cmd_rx, tracklist, player_runtime) = setup_schema().await;
     let (_, _) = Player::new(
         |_| {},
         Arc::clone(&cmd_tx),
@@ -223,7 +223,7 @@ async fn artist() {
 
 #[tokio::test]
 async fn album() {
-    let (schema, cmd_tx, cmd_rx, tracklist) = setup_schema().await;
+    let (schema, cmd_tx, cmd_rx, tracklist, player_runtime) = setup_schema().await;
     let (_, _) = Player::new(
         |_| {},
         Arc::clone(&cmd_tx),
@@ -275,7 +275,7 @@ async fn album() {
 
 #[tokio::test]
 async fn search() {
-    let (schema, cmd_tx, cmd_rx, tracklist) = setup_schema().await;
+    let (schema, cmd_tx, cmd_rx, tracklist, player_runtime) = setup_schema().await;
     let (_, _) = Player::new(
         |_| {},
         Arc::clone(&cmd_tx),

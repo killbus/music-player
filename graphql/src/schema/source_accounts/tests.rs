@@ -4,7 +4,10 @@ use super::*;
 use async_graphql::{EmptySubscription, MergedObject, Request, Schema, Variables};
 use migration::{Migrator, MigratorTrait};
 use music_player_extensions::{abi, host::HostContext};
-use music_player_playback::{player::PlayerCommand, source_resolver::SourceResolver};
+use music_player_playback::{
+    player::{PlayerCommand, PlayerRuntime, PlayerRuntimePhase, PlayerRuntimeSnapshot},
+    source_resolver::SourceResolver,
+};
 use music_player_renderer::CurrentReceiverDevice;
 use music_player_storage::Database;
 use music_player_types::source::ResourceKind;
@@ -213,11 +216,17 @@ impl Fixture {
         let resolver = SourceResolver::new(db, "fixture".into(), true)
             .with_extensions(manager.clone(), vec!["mp3".into()]);
         let (tx, commands) = unbounded_channel();
+        let player_runtime = Arc::new(StdMutex::new(PlayerRuntimeSnapshot {
+            output: "test-output".to_string(),
+            phase: PlayerRuntimePhase::Ready,
+            error: None,
+        }));
         let api = Schema::build(SourceAccountsQuery, Mutations::default(), EmptySubscription)
             .data(unrelated_db.clone())
             .data(resolver)
             .data(Arc::new(StdMutex::new(tx)))
             .data(Arc::new(Mutex::new(CurrentReceiverDevice::new())))
+            .data(player_runtime)
             .finish();
         Self {
             api,

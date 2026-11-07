@@ -512,7 +512,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cloned_cmd_rx = Arc::clone(&cmd_rx);
     let cmd_tx_ws = Arc::clone(&cloned_cmd_tx);
     let cmd_tx_webui = Arc::clone(&cloned_cmd_tx);
-    let (_, _) = Player::with_source_resolver(
+    let (player, _) = Player::with_source_resolver(
         move |event| {
             let peers = cloned_peer_map.lock().unwrap();
 
@@ -570,6 +570,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&tracklist),
         sources.clone(),
     );
+    let player_runtime = player.runtime();
 
     let err = parsed.err().unwrap().to_string();
     if !err.eq("No subcommand found") {
@@ -680,7 +681,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         });
-        start_webui(cmd_tx_webui, tracklist_webui, providers_webui, db, sources).await?;
+        start_webui(
+            cmd_tx_webui,
+            tracklist_webui,
+            providers_webui,
+            db,
+            sources,
+            player_runtime,
+        )
+        .await?;
         return Ok(());
     }
 

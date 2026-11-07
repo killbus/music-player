@@ -3,7 +3,10 @@ use super::*;
 use crate::load_tracks;
 use async_graphql::{EmptySubscription, Request, Schema, Variables};
 use migration::{Migrator, MigratorTrait};
-use music_player_playback::source_resolver::SourceResolver;
+use music_player_playback::{
+    player::{PlayerRuntime, PlayerRuntimePhase, PlayerRuntimeSnapshot},
+    source_resolver::SourceResolver,
+};
 use music_player_storage::saved_servers::{self, NewServer};
 use music_player_types::source::{LocalSourceRef, RemoteIdentity, ResourceKind, SourceRef};
 use serde_json::{json, Value};
@@ -164,12 +167,14 @@ fn api_with_resolver(db: Database, resolver: SourceResolver) -> Api {
     let device = Arc::new(Mutex::new(CurrentReceiverDevice::new()));
     // Deliberately no ProviderState or discovery devices. A reserved handle
     // reaching the legacy browsing/decorating branch is a regression.
+    let player_runtime = ready_player_runtime();
     let schema = Schema::build(TracklistQuery, TracklistMutation, EmptySubscription)
         .data(resolver)
         .data(db)
         .data(Arc::clone(&commands))
         .data(Arc::clone(&device))
         .data(Arc::new(StdMutex::new(TracklistState::new_empty())))
+        .data(player_runtime)
         .finish();
     Api {
         schema,
@@ -177,6 +182,14 @@ fn api_with_resolver(db: Database, resolver: SourceResolver) -> Api {
         commands,
         rx,
     }
+}
+
+fn ready_player_runtime() -> PlayerRuntime {
+    Arc::new(StdMutex::new(PlayerRuntimeSnapshot {
+        output: "test-output".to_string(),
+        phase: PlayerRuntimePhase::Ready,
+        error: None,
+    }))
 }
 
 fn input(id: &str, uri: &str) -> Value {
