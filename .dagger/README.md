@@ -11,10 +11,12 @@ can run CI without a sibling checkout or a published SDK package.
 Five standalone modules are available under [`modules/`](modules/README.md):
 `linux-packaging` (deb/rpm), `archive` (tar.gz/SHA-256), `gemfury`, and
 `github-assets`, and `codecov` (coverage uploads). `CI.Release` reuses their shared PureScript implementations.
-Linux workflows call the upload modules directly with Dagger Secrets, publishing
-only the exported `artifacts/release` directory. Desktop metadata still comes
-from the existing `dist/` templates; the standalone packaging script remains
-available for developers.
+These modules remain upstream development/CI inputs, not the fork's release
+publishing authority. The fork's native GitHub Actions workflows own publication:
+`release.yml`, `release-for-mac.yml`, `release-for-windows.yml`, and
+`release-slint-desktop.yml`. They use the reviewed scripts under `scripts/` and
+templates under `dist/`; no workflow calls the Dagger GitHub/Gemfury upload
+modules. See [`dist/README.md`](../dist/README.md) for distribution contracts.
 
 ## Run locally
 
@@ -78,17 +80,17 @@ container boundary.
 | [CI.Nix](ci/src/CI/Nix.purs) | Linux flake and nixpkgs package checks |
 | [Main](ci/src/Main.purs) | Typed Dagger function registration using named handlers and `ado` |
 
-GitHub workflows retain their triggers, release selection, matrices, permissions,
-and overwrite behavior. Native macOS/Windows compilation, macOS app signing/DMGs, and
-FlakeHub publishing stay on their original runners.
-SARIF and Cachix retain their existing upload steps. Rust and web UI coverage
-uploads share the standalone Codecov module and remain non-blocking. Linux GitHub and Gemfury
-credentials are passed to the upload modules as Secrets.
+Fork release workflows retain native macOS/Windows and Slint builds. Ordinary
+pushes and pull requests validate without publishing; publication requires a
+release event or an explicit publish dispatch against an existing matching tag.
+The release scripts verify source/tag identity and upload only missing assets,
+never clobber existing downloads. All release workflows rebuild the Web bundle
+before compiling Rust. FlakeHub remains manual-only and is not validated as a
+fork publishing path.
 
-Release workflows check out pipeline tooling at `github.workflow_sha` and build
-the requested release tree separately. The desktop workflow retains its original
-behavior: the selected workflow ref supplies the code, while the input tag
-selects the release to upload to.
+SARIF and Cachix retain their upload steps. Rust and Web coverage uploads use
+the standalone Codecov module and remain non-blocking. Local Dagger artifact
+builds are not a substitute for the fork's native package/runtime checks.
 
 ## Edit the pipelines
 
@@ -157,5 +159,6 @@ python3 .dagger/check-uploads.py
 ```
 
 The Dagger module checks workflow runs these offline checks and actionlint.
-Upload shell blocks are tested with a fake executable; no engine or external
+Fork publication guards and negative cases are checked without executing any
+publishers. Codecov shell blocks use a fake executable; no engine or external
 publication is used. These checks do not replace end-to-end container validation.

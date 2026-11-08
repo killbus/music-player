@@ -2,7 +2,7 @@ name: rust-clippy analyze
 
 on:
   push:
-    branches: ["master"]
+    branches: ["master", "migration/upstream-0.4.7", 'migration/upstream-0.4.7-clean']
   pull_request:
     # The branches below must be a subset of the branches above
     branches: ["master"]
@@ -17,7 +17,7 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up Dagger
         uses: ./.github/actions/setup-dagger
       - name: Analyze with Clippy
@@ -25,7 +25,7 @@ jobs:
         continue-on-error: true
 
       - name: Upload analysis results to GitHub
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           sarif_file: artifacts/rust-clippy-results.sarif
           wait-for-processing: true
