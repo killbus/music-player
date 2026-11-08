@@ -15,16 +15,16 @@ rustPlatform.buildRustPackage (finalAttrs: {
   __structuredAttrs = true;
 
   pname = "music-player";
-  version = "0.4.7";
+  version = "0.4.7-fork.1";
 
   src = fetchFromGitHub {
     owner = "tsirysndr";
     repo = "music-player";
     tag = "v${finalAttrs.version}";
-    hash = lib.fakeHash; # fill in once the v0.4.7 tag is pushed
+    hash = lib.fakeHash; # fill in once the v0.4.7-fork.1 tag is pushed
   };
 
-  cargoHash = lib.fakeHash; # fill in once the v0.4.7 tag is pushed
+  cargoHash = lib.fakeHash; # fill in once the v0.4.7-fork.1 tag is pushed
 
   cargoBuildFlags = [
     "--package"

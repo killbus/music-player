@@ -8,6 +8,41 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 This file starts at 0.2.1. For earlier releases see the
 [git tags](https://github.com/tsirysndr/music-player/tags).
 
+## [0.4.7-fork.1] — 2026-11-08
+
+The fork's first release on top of upstream 0.4.7, and the merge of the fork
+line into it. Upstream 0.4.7's own entries below describe the upstream features
+this tree inherits. Release notes:
+[`dist/releases/0.4.7-fork.1.md`](dist/releases/0.4.7-fork.1.md).
+
+### Added
+
+- Account-bound Emby sources and source extensions across the model, storage,
+  migration, provider, playback, server, GraphQL, client and Web UI layers,
+  including the Web UI media browser and audio-choice editor.
+- A managed playback session layer: finite streams advance the queue exactly
+  once on a clean end of stream, with pending-output accounting.
+- Self-cast separation and a local `PlayerRuntime` readiness gate for local
+  playback mutations.
+- Headless Linux distribution: Debian and RPM packages, a systemd unit and a
+  container runtime image, validated by one release pipeline.
+
+### Changed
+
+- Playback runs on vendored `rockbox-playback 0.9.1` with host-owned stream
+  sessions; the fork's vendored `0.7.0` is retired.
+- Equalizer band gains use upstream's per-band cutoff and Q table on every path.
+- Rust tests, web checks and Clippy run through upstream's Dagger modules; the
+  fork owns the release pipeline.
+
+### Fixed
+
+- Emby season listings use `SortBy=SortName`; `SortName,Id` made Emby answer
+  HTTP 500 for season children.
+- The selected track plays atomically from the Web UI through one `playTrack`
+  mutation.
+- Playback output accepts a FIFO or a character device for the configured
+  `audio_output` and rejects regular files.
 ## [0.4.7] — 2026-10-29
 
 ### Added
