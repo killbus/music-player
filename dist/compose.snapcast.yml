@@ -1,0 +1,17 @@
+services:
+  music-player:
+    # Set MUSIC_PLAYER_IMAGE to the published version or digest you tested.
+    image: ${MUSIC_PLAYER_IMAGE:?Set MUSIC_PLAYER_IMAGE to a published image}
+    restart: unless-stopped
+    environment:
+      MUSIC_PLAYER_AUDIO_OUTPUT: fifo:/run/snapcast/music-player.fifo
+    ports:
+      - "5053:5053"
+      - "5051:5051"
+      - "5052:5052"
+    volumes:
+      - music-player-data:/data
+      - ./music:/music:ro
+      - ./snapcast:/run/snapcast
+volumes:
+  music-player-data:

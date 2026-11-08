@@ -1,4 +1,6 @@
 ## Music Player (written in Rust)
+Linux CLI packages, systemd service and container deployment: [distribution guide](dist/README.md).
+
 
 <p>
   <a href="https://flakehub.com/flake/tsirysndr/music-player" target="_blank">
