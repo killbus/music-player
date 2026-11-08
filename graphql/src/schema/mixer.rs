@@ -8,6 +8,8 @@ use music_player_playback::player::{PlayerCommand, EQ_BAND_FILTERS};
 use music_player_settings::{read_settings, save_audio_settings, AudioSettings, Settings};
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::require_local_player_ready;
+
 // The playback engine has no volume read-back over the command channel, so the
 // last value set through this API is remembered here.
 static VOLUME: AtomicU32 = AtomicU32::new(100);
@@ -153,6 +155,7 @@ pub struct MixerMutation;
 impl MixerMutation {
     async fn set_volume(&self, ctx: &Context<'_>, volume: i32) -> Result<bool, Error> {
         let volume = volume.clamp(0, 100) as u16;
+        require_local_player_ready(ctx)?;
         let cmd_tx = ctx
             .data::<Arc<Mutex<UnboundedSender<PlayerCommand>>>>()
             .unwrap();
@@ -263,6 +266,7 @@ impl MixerMutation {
         let cmd_tx = ctx
             .data::<Arc<Mutex<UnboundedSender<PlayerCommand>>>>()
             .unwrap();
+        require_local_player_ready(ctx)?;
         cmd_tx.lock().unwrap().send(cmd)?;
 
         // Persisted after the engine accepted it, so a rejected command does
@@ -296,6 +300,7 @@ impl MixerMutation {
         let cmd_tx = ctx
             .data::<Arc<Mutex<UnboundedSender<PlayerCommand>>>>()
             .unwrap();
+        require_local_player_ready(ctx)?;
         cmd_tx
             .lock()
             .unwrap()
@@ -308,6 +313,7 @@ impl MixerMutation {
     }
 
     async fn set_mute(&self, ctx: &Context<'_>, mute: bool) -> Result<bool, Error> {
+        require_local_player_ready(ctx)?;
         let cmd_tx = ctx
             .data::<Arc<Mutex<UnboundedSender<PlayerCommand>>>>()
             .unwrap();
