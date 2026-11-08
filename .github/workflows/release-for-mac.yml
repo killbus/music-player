@@ -1,5 +1,8 @@
 name: release-for-mac
 on:
+  # Migration validation only; publishing still requires release or explicit dispatch.
+  push:
+    branches: ['migration/upstream-0.4.7']
   pull_request:
   release:
     types: [created]
