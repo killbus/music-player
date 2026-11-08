@@ -23,3 +23,13 @@ export const GET_CURRENTLY_PLAYING = gql`
   }
   ${TRACK_FRAGMENT}
 `;
+
+export const GET_PLAYER_RUNTIME = gql`
+  query PlayerRuntime {
+    playerRuntime {
+      output
+      phase
+      error
+    }
+  }
+`;
