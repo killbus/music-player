@@ -1,6 +1,8 @@
 name: Dagger integration pipeline
 
 on:
+  push:
+    branches: ["migration/upstream-0.4.7", 'migration/upstream-0.4.7-clean']
   workflow_dispatch:
 
 permissions:
@@ -11,11 +13,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-dagger
       - name: Integration tests and release build
         run: ./.dagger/run
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: integration-and-build
           path: artifacts/

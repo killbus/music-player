@@ -3,7 +3,7 @@ description: Install the repository-pinned Dagger 1.0.0-beta.21 CLI
 runs:
   using: composite
   steps:
-    - uses: jdx/mise-action@v2
+    - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
     - name: Check CLI version
       shell: bash
       run: dagger version
