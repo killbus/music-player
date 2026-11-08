@@ -8,6 +8,7 @@ use async_graphql::*;
 use futures_util::Stream;
 use music_player_provider::ProviderConfig;
 use music_player_renderer::CurrentReceiverDevice;
+use music_player_settings::{read_settings, Settings};
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::simple_broker::SimpleBroker;
@@ -72,6 +73,11 @@ impl DevicesQuery {
     }
 
     async fn list_cast_devices(&self, ctx: &Context<'_>) -> Result<Vec<Device>, Error> {
+        let current_daemon_id = read_settings()
+            .ok()
+            .and_then(|config| config.try_deserialize::<Settings>().ok())
+            .map(|settings| settings.device_id)
+            .unwrap_or_default();
         let devices = ctx.data::<Arc<Mutex<Vec<types::Device>>>>().unwrap();
         let devices = devices.lock().unwrap().clone();
 
@@ -85,6 +91,7 @@ impl DevicesQuery {
         Ok(devices
             .into_iter()
             .filter(|device| device.is_cast_device)
+            .filter(|device| !current_daemon_id.is_empty() && device.id != current_daemon_id)
             .filter(|device| seen.insert(device.id.clone()))
             .map(Into::into)
             .collect())
@@ -156,8 +163,18 @@ impl DevicesMutation {
     }
 
     async fn connect_to_cast_device(&self, ctx: &Context<'_>, id: ID) -> Result<Device, Error> {
+        let current_daemon_id = read_settings()
+            .ok()
+            .and_then(|config| config.try_deserialize::<Settings>().ok())
+            .map(|settings| settings.device_id)
+            .unwrap_or_default();
         let devices = ctx.data::<Arc<Mutex<Vec<types::Device>>>>().unwrap();
         let devices = devices.lock().unwrap().clone();
+        if !current_daemon_id.is_empty() && id.to_string() == current_daemon_id {
+            return Err(Error::new(
+                "The current daemon is the local output, not a remote receiver",
+            ));
+        }
         let io_device = ctx
             .data::<Arc<TokioMutex<CurrentReceiverDevice>>>()
             .unwrap();
