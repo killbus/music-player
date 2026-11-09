@@ -8,10 +8,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 This file starts at 0.2.1. For earlier releases see the
 [git tags](https://github.com/tsirysndr/music-player/tags).
 
-## [0.4.7-fork.1] — 2026-11-08
+## [0.4.7-fork.1] - Unreleased
 
-The fork's first release on top of upstream 0.4.7, and the merge of the fork
-line into it. Upstream 0.4.7's own entries below describe the upstream features
+The fork's prepared prerelease on top of upstream 0.4.7, with the fork's
+capabilities carried forward on a cleaned mainline. Upstream 0.4.7's own entries
+below describe the upstream features
 this tree inherits. Release notes:
 [`dist/releases/0.4.7-fork.1.md`](dist/releases/0.4.7-fork.1.md).
 
@@ -26,6 +27,9 @@ this tree inherits. Release notes:
   playback mutations.
 - Headless Linux distribution: Debian and RPM packages, a systemd unit and a
   container runtime image, validated by one release pipeline.
+- Server-authoritative Web shuffle and repeat controls in the player bar and
+  mobile queue drawer, including Emby local playback, cross-client polling,
+  repeat-one state, pending/error feedback and disabled remote-receiver controls.
 
 ### Changed
 
@@ -43,6 +47,18 @@ this tree inherits. Release notes:
   mutation.
 - Playback output accepts a FIFO or a character device for the configured
   `audio_output` and rejects regular files.
+- Managed EOF playback resumes draining and queue advancement after unmuting;
+  upstream's zero-volume progress-freeze policy is unchanged.
+- Healthy draining remains playing and Play is idempotent during draining.
+- Play after natural queue exhaustion replays the last occurrence from zero;
+  explicit mid-track pause/stop retains its checkpoint.
+
+### Known Limits
+
+- The inherited Dagger integration CLI failure remains deferred; browser,
+  live Emby and end-device acceptance are not established by CI. See the
+  prerelease notes for the receiver, schema and raw-Cargo Web bundle limits.
+
 ## [0.4.7] — 2026-10-29
 
 ### Added
