@@ -21,6 +21,9 @@ export const emptyTracklist = {
 };
 
 export const handlers = [
+  graphql.query("PlaybackModes", () => HttpResponse.json({ data: {
+    playbackModes: { available: true, unavailableReason: null, shuffle: false, repeat: "OFF" },
+  } })),
   graphql.query("GetAlbums", () =>
     HttpResponse.json({ data: { albums: fixtures.albums } })
   ),

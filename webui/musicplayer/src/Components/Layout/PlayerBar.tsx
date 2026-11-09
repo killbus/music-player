@@ -1,4 +1,6 @@
 import { useTimeFormat } from "../../Hooks/useFormat";
+import type { PlaybackModeControlsState } from "../../Hooks/usePlaybackModes";
+import { ModeNotice, RepeatControl, ShuffleControl } from "./PlaybackModeControls";
 import { resourceUriResolver } from "../../ResourceUriResolver";
 import {
   Artwork,
@@ -61,8 +63,7 @@ export type PlayerBarProps = {
   /** VU levels, 0..1. These were hardcoded, so the meter never moved. */
   vuLeft?: number;
   vuRight?: number;
-  onShuffle?: () => void;
-  onRepeat?: () => void;
+  modes?: PlaybackModeControlsState;
 };
 
 /**
@@ -108,8 +109,7 @@ const PlayerBar = ({
   castingTo,
   vuLeft = 0,
   vuRight = 0,
-  onShuffle,
-  onRepeat,
+  modes,
 }: PlayerBarProps) => {
   const { formatTime } = useTimeFormat();
   const position = duration > 0 ? progress / duration : 0;
@@ -195,16 +195,15 @@ const PlayerBar = ({
       </div>
 
       {/* Transport + seek */}
-      <div className="flex flex-col items-center justify-center gap-[6px] lg:flex-1">
+      <div className="relative flex flex-col items-center justify-center gap-[6px] lg:flex-1">
+        {!isRadio && (modes?.error || modes?.message) && (
+          <div className="absolute bottom-full mb-3 hidden w-72 rounded-control border border-line bg-panel p-3 sm:block">
+            <ModeNotice modes={modes} />
+          </div>
+        )}
         <div className="flex items-center gap-[10px]">
           {!isRadio && (
-            <IconButton
-              icon={Icons.shuffle}
-              iconSize={15}
-              aria-label="Shuffle"
-              className="hidden sm:inline-flex"
-              onClick={() => onShuffle?.()}
-            />
+            <ShuffleControl modes={modes} className="hidden sm:inline-flex" />
           )}
           {!isRadio && (
             <IconButton
@@ -229,13 +228,7 @@ const PlayerBar = ({
             />
           )}
           {!isRadio && (
-            <IconButton
-              icon={Icons.repeat}
-              iconSize={15}
-              aria-label="Repeat"
-              className="hidden sm:inline-flex"
-              onClick={() => onRepeat?.()}
-            />
+            <RepeatControl modes={modes} className="hidden sm:inline-flex" />
           )}
         </div>
         {!isRadio && (

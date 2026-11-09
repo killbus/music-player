@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { fetcher } from "../../Api/fetcher";
 import { useLikes } from "../../Hooks/useLikes";
 import { usePlayback } from "../../Hooks/usePlayback";
+import { usePlaybackModes } from "../../Hooks/usePlaybackModes";
 import { useDevices } from "../../Hooks/useDevices";
 import { useLevels } from "../../Hooks/useLevels";
 import { useVolume } from "../../Hooks/useVolume";
@@ -68,6 +69,7 @@ const PlayerBarWithData = ({
   onOpenDevices: () => void;
 }) => {
   const { nowPlaying, play, pause, next, previous, seek } = usePlayback();
+  const modes = usePlaybackModes();
   const { isLiked, toggleLike } = useLikes();
   const [queueOpen, setQueueOpen] = useAtom(queueOpenAtom);
   const [audioOpen, setAudioOpen] = useAtom(audioSettingsOpenAtom);
@@ -118,6 +120,7 @@ const PlayerBarWithData = ({
       onOpenAudioSettings={() => setAudioOpen((open) => !open)}
       onOpenDevices={onOpenDevices}
       castingTo={currentCastDevice?.name}
+      modes={modes}
     />
   );
 };

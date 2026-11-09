@@ -9,7 +9,7 @@ import PlayerBar from "./PlayerBar";
  * It is presentational — `PlayerBarWithData` supplies the state in the app —
  * so each of these is a plain set of props. Widen the canvas to see the VFD
  * and the volume knob: below `lg` the bar collapses to the transport, and
- * below `sm` it drops the shuffle, repeat and heart too.
+ * below `sm` shuffle/repeat move to the queue drawer and the heart is hidden.
  */
 const meta: Meta<typeof PlayerBar> = {
   title: "Layout/PlayerBar",
@@ -35,6 +35,10 @@ const meta: Meta<typeof PlayerBar> = {
     onToggleQueue: noop,
     onOpenFullPlayer: noop,
     onOpenAudioSettings: noop,
+    modes: {
+      shuffle: false, repeat: "OFF", disabled: false, pending: false,
+      message: null, error: null, refresh: noop, toggleShuffle: noop, cycleRepeat: noop,
+    },
   },
 };
 
@@ -43,6 +47,14 @@ export default meta;
 type Story = StoryObj<typeof PlayerBar>;
 
 export const Playing: Story = {};
+
+export const RepeatOne: Story = {
+  args: { modes: { ...meta.args!.modes!, shuffle: true, repeat: "ONE" } },
+};
+
+export const ModesUnavailable: Story = {
+  args: { modes: { ...meta.args!.modes!, shuffle: null, repeat: null, disabled: true, message: "Playback modes are unavailable on this remote receiver." } },
+};
 
 export const Paused: Story = {
   args: { playing: false },

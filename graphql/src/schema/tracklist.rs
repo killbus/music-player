@@ -23,6 +23,7 @@ use crate::{
     validate_queue,
 };
 
+use super::playback_modes::{read_modes, set_modes, PlaybackModes, RepeatMode};
 use super::provider;
 use crate::simple_broker::SimpleBroker;
 use crate::update_cover_url;
@@ -68,11 +69,23 @@ impl TracklistQuery {
 
         Ok(response)
     }
-    async fn get_repeat(&self, _ctx: &Context<'_>) -> Result<bool, Error> {
-        todo!()
+    async fn playback_modes(&self, ctx: &Context<'_>) -> Result<PlaybackModes, Error> {
+        read_modes(ctx).await
     }
-    async fn get_random(&self, _ctx: &Context<'_>) -> Result<bool, Error> {
-        todo!()
+    #[graphql(deprecation = "Use playbackModes.repeat for OFF, ALL or ONE")]
+    async fn get_repeat(&self, ctx: &Context<'_>) -> Result<bool, Error> {
+        let modes = read_modes(ctx).await?;
+        modes
+            .repeat
+            .map(|mode| mode != RepeatMode::Off)
+            .ok_or_else(|| Error::new(modes.unavailable_reason.unwrap_or_default()))
+    }
+    #[graphql(deprecation = "Use playbackModes.shuffle")]
+    async fn get_random(&self, ctx: &Context<'_>) -> Result<bool, Error> {
+        let modes = read_modes(ctx).await?;
+        modes
+            .shuffle
+            .ok_or_else(|| Error::new(modes.unavailable_reason.unwrap_or_default()))
     }
     async fn get_next_track(&self, _ctx: &Context<'_>) -> Result<Option<Track>, Error> {
         todo!()
@@ -326,11 +339,19 @@ impl TracklistMutation {
         Ok(true)
     }
 
+    /// Enable persistent shuffle. Use setShuffle to explicitly disable it.
+    #[graphql(deprecation = "Use setShuffle(enabled: Boolean!)")]
     async fn shuffle(&self, ctx: &Context<'_>) -> Result<bool, Error> {
-        let _player_cmd = ctx
-            .data::<Arc<StdMutex<UnboundedSender<PlayerCommand>>>>()
-            .unwrap();
-        todo!()
+        set_modes(ctx, Some(true), None).await
+    }
+
+    /// Changes upcoming order, not the current item. Disabling does not undo it.
+    async fn set_shuffle(&self, ctx: &Context<'_>, enabled: bool) -> Result<bool, Error> {
+        set_modes(ctx, Some(enabled), None).await
+    }
+
+    async fn set_repeat(&self, ctx: &Context<'_>, mode: RepeatMode) -> Result<bool, Error> {
+        set_modes(ctx, None, Some(mode)).await
     }
 
     async fn play_next(&self, ctx: &Context<'_>, id: ID) -> Result<bool, Error> {

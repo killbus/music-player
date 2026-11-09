@@ -21,11 +21,13 @@ type GraphQLResponse<TData> = {
 export const fetcher = <TData, TVariables>(
   query: string,
   variables?: TVariables,
-  options?: RequestInit["headers"]
+  options?: RequestInit["headers"],
+  signal?: AbortSignal
 ) => {
   return async (): Promise<TData> => {
     const res = await fetch(getApiUrl(), {
       method: "POST",
+      signal,
       headers: {
         "Content-Type": "application/json",
         ...options,

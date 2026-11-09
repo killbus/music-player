@@ -1396,6 +1396,26 @@ impl PlayerInternal {
                 }
             }
             PlayerCommand::SetDither(enabled) => self.engine.set_dither(enabled),
+            PlayerCommand::SetPlaybackModes {
+                shuffle,
+                repeat_mode,
+                reply,
+            } => {
+                // Explicit setters are idempotent: retrying shuffle-on must not
+                // reshuffle the queue. Do not apply a request that timed out in line.
+                if !reply.is_closed() {
+                    let result = (|| {
+                        if let Some(enabled) = shuffle.filter(|enabled| *enabled != self.shuffle) {
+                            self.handle_command(PlayerCommand::SetShuffle(enabled))?;
+                        }
+                        if let Some(mode) = repeat_mode.filter(|mode| *mode != self.repeat_mode) {
+                            self.handle_command(PlayerCommand::SetRepeat(mode))?;
+                        }
+                        Ok::<_, anyhow::Error>(())
+                    })();
+                    let _ = reply.send(result.map_err(|error| error.to_string()));
+                }
+            }
             // The queue lives in the tracklist (the engine only holds the
             // current track + one lookahead), so shuffle/repeat act here.
             PlayerCommand::SetShuffle(enabled) => {
@@ -1961,6 +1981,12 @@ pub enum PlayerCommand {
     SetDither(bool),
     SetShuffle(bool),
     SetRepeat(i32),
+    /// Acknowledged, idempotent mode setters; omitted fields are unchanged.
+    SetPlaybackModes {
+        shuffle: Option<bool>,
+        repeat_mode: Option<i32>,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
 }
 
 pub fn replaygain_mode(mode: i32) -> ReplayGainMode {
@@ -2134,6 +2160,36 @@ mod queue_snapshot_tests {
             },
             listener,
         )
+    }
+
+    #[test]
+    fn acknowledged_shuffle_is_idempotent_and_preserves_occurrences() {
+        let mut queue = Tracklist::new((0..32).map(|_| entry().track).collect());
+        queue.next_track();
+        let current = queue.current_entry();
+        let before = queue.entries().1;
+        let (mut player, _listener) = host(queue);
+        let mut shuffled = None;
+        for enabled in [true, true, false] {
+            let (reply, mut received) = tokio::sync::oneshot::channel();
+            player
+                .handle_command(PlayerCommand::SetPlaybackModes {
+                    shuffle: Some(enabled),
+                    repeat_mode: None,
+                    reply,
+                })
+                .unwrap();
+            assert_eq!(received.try_recv().unwrap(), Ok(()));
+            let queue = player.tracklist.lock().unwrap();
+            assert_eq!(queue.current_entry(), current);
+            let upcoming = queue.entries().1;
+            if let Some(expected) = &shuffled {
+                assert_eq!(&upcoming, expected);
+            }
+            assert_eq!(upcoming.len(), before.len());
+            assert!(before.iter().all(|entry| upcoming.contains(entry)));
+            shuffled = Some(upcoming);
+        }
     }
 
     #[test]

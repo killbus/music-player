@@ -31,6 +31,7 @@ pub mod media;
 pub mod mixer;
 pub mod objects;
 pub mod playback;
+pub mod playback_modes;
 pub mod playlist;
 pub mod provider;
 pub mod radio;

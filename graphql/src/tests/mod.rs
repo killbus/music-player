@@ -22,6 +22,7 @@ pub mod library;
 mod media;
 pub mod objects;
 pub mod playback;
+mod playback_modes;
 pub mod playlist;
 mod servers;
 pub mod tracklist;

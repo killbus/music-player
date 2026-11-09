@@ -348,6 +348,73 @@ async fn managed_manual_stop_during_drain_retains_delivered_checkpoint() {
 }
 
 #[tokio::test]
+async fn acknowledged_modes_preserve_managed_current_and_shuffle_off_keeps_order() {
+    let mut f = Fixture::with_volume(Response::Complete, 0, 0).await;
+    f.until(|f| f.player.source_phase == Some(Phase::Draining))
+        .await;
+    let current = f.player.tracklist.lock().unwrap().current_entry();
+    let generation = f
+        .player
+        .source_playback
+        .as_ref()
+        .unwrap()
+        .snapshot()
+        .generation;
+    let (reply, received) = tokio::sync::oneshot::channel();
+    f.player
+        .handle_command(PlayerCommand::SetPlaybackModes {
+            shuffle: Some(true),
+            repeat_mode: Some(1),
+            reply,
+        })
+        .unwrap();
+    assert_eq!(received.await.unwrap(), Ok(()));
+    let shuffled = f.player.tracklist.lock().unwrap().entries();
+    for enabled in [true, false] {
+        let (reply, received) = tokio::sync::oneshot::channel();
+        f.player
+            .handle_command(PlayerCommand::SetPlaybackModes {
+                shuffle: Some(enabled),
+                repeat_mode: None,
+                reply,
+            })
+            .unwrap();
+        assert_eq!(received.await.unwrap(), Ok(()));
+        let queue = f.player.tracklist.lock().unwrap();
+        assert_eq!(queue.current_entry(), current);
+        assert_eq!(queue.entries(), shuffled);
+        assert_eq!(queue.shuffle_enabled(), enabled);
+        assert_eq!(queue.repeat_mode(), 1);
+    }
+    assert_eq!(
+        f.player
+            .source_playback
+            .as_ref()
+            .unwrap()
+            .snapshot()
+            .generation,
+        generation
+    );
+    assert_eq!(*f.requests.lock().unwrap(), ["a"]);
+    // A queued request abandoned before dispatch must not change the mode.
+    let (reply, received) = tokio::sync::oneshot::channel();
+    drop(received);
+    f.player
+        .handle_command(PlayerCommand::SetPlaybackModes {
+            shuffle: Some(true),
+            repeat_mode: Some(2),
+            reply,
+        })
+        .unwrap();
+    assert!(!f.player.shuffle);
+    assert_eq!(f.player.repeat_mode, 1);
+    f.player.handle_set_volume(100);
+    f.until(|f| f.requests.lock().unwrap().len() == 3).await;
+    f.player.handle_pause();
+    assert_eq!(*f.requests.lock().unwrap(), ["a", "b", "a"]);
+}
+
+#[tokio::test]
 async fn managed_queue_repeat_one_reopens_current_and_repeat_all_wraps() {
     for (repeat, expected) in [(2, vec!["a", "a"]), (1, vec!["a", "b", "a"])] {
         let mut f = Fixture::new(Response::Complete, repeat).await;

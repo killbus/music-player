@@ -241,6 +241,8 @@ export type Mood = {
 };
 
 export type Mutation = {
+  setShuffle: Scalars['Boolean']['output'];
+  setRepeat: Scalars['Boolean']['output'];
   __typename?: 'Mutation';
   /**
    * Add a station the user typed in themselves, after checking the url is
@@ -662,6 +664,7 @@ export type PositionMilliseconds = {
 };
 
 export type Query = {
+  playbackModes: PlaybackModes;
   __typename?: 'Query';
   /**
    * The account signed in right now. `null` means nobody is.
@@ -4400,3 +4403,25 @@ useInfiniteGetTracklistQuery.getKey = (variables?: GetTracklistQueryVariables) =
 
 
 useGetTracklistQuery.fetcher = (variables?: GetTracklistQueryVariables, options?: RequestInit['headers']) => fetcher<GetTracklistQuery, GetTracklistQueryVariables>(GetTracklistDocument, variables, options);
+
+export type PlaybackModes = {
+  __typename?: 'PlaybackModes';
+  available: Scalars['Boolean']['output'];
+  repeat?: Maybe<RepeatMode>;
+  shuffle?: Maybe<Scalars['Boolean']['output']>;
+  unavailableReason?: Maybe<Scalars['String']['output']>;
+};
+
+export enum RepeatMode {
+  All = 'ALL',
+  Off = 'OFF',
+  One = 'ONE'
+}
+
+export type MutationSetShuffleArgs = {
+  enabled: Scalars['Boolean']['input'];
+};
+
+export type MutationSetRepeatArgs = {
+  mode: RepeatMode;
+};

@@ -6,6 +6,7 @@ import { usePlayback } from "../../Hooks/usePlayback";
 import { queueOpenAtom } from "../../State";
 import type { Track } from "../../Types";
 import { Artwork, IconButton, Icons, cn } from "../UI";
+import { QueuePlaybackModes } from "./PlaybackModeControls";
 
 type QueueTab = "queue" | "history" | "audio";
 
@@ -90,6 +91,7 @@ const QueueDrawer = () => {
           />
         </div>
 
+        <QueuePlaybackModes />
         <div className="flex gap-2 px-4 pb-[10px]">
           {(["queue", "history", "audio"] as const).map((value) => (
             <button
