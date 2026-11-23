@@ -23,6 +23,7 @@ permissions:
 env:
   RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
   PUBLISH_RELEASE: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
+  ALLOW_RELEASE_ASSET_REPLACE: ${{ vars.ALLOW_RELEASE_ASSET_REPLACE }}
 
 jobs:
   release:

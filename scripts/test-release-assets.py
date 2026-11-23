@@ -42,6 +42,7 @@ class PublicationTests(unittest.TestCase):
         self.environment = patch.dict(os.environ, {
             "PUBLISH_RELEASE": "true", "RELEASE_TAG": "v0.4.5",
             "GITHUB_ENV": str(Path("environment").resolve()),
+            "ALLOW_RELEASE_ASSET_REPLACE": "false",
         })
         self.environment.start()
         self.addCleanup(self.environment.stop)
@@ -100,6 +101,45 @@ class PublicationTests(unittest.TestCase):
         for call in upload.call_args_list:
             self.assertNotIn("--clobber", call.args[0])
             self.assertTrue(call.kwargs["check"])
+
+    def test_replaces_existing_asset_only_when_authorized(self):
+        write_pair("new.tar.gz")
+        os.environ["ALLOW_RELEASE_ASSET_REPLACE"] = "true"
+        deleted, uploaded = [], []
+
+        def transfer(args, **kwargs):
+            if args[:2] == ["gh", "release"] and args[2] == "delete-asset":
+                self.assertEqual(args[-1], "--yes")
+                deleted.append(args[-2])
+            elif args[:2] == ["gh", "release"] and args[2] == "download":
+                (Path(args[-1]) / args[-3]).write_bytes(b"package bytes")
+            elif args[:2] == ["gh", "release"] and args[2] == "upload":
+                uploaded.append(Path(args[-1]).name)
+
+        with patch.object(assets.sys, "argv", ["assets", "publish", "*.tar.gz*"]), \
+             patch.object(assets, "release", return_value={"assets": [
+                 {"name": "new.tar.gz"}, {"name": "new.tar.gz.sha256"}
+             ]}), \
+             patch.object(assets.subprocess, "run", side_effect=transfer) as run, \
+             patch.object(assets, "verify_uploaded_files"):
+            assets.main()
+        self.assertEqual(deleted, ["new.tar.gz", "new.tar.gz.sha256"])
+        self.assertEqual(uploaded, ["new.tar.gz", "new.tar.gz.sha256"])
+        self.assertTrue(all(call.args[0][:3] != ["gh", "release", "upload"]
+                            or "--clobber" not in call.args[0] for call in run.call_args_list))
+
+    def test_invalid_replacement_does_not_delete_existing_assets(self):
+        archive, checksum = write_pair("new.tar.gz")
+        archive.write_bytes(b"changed after checksum generation")
+        os.environ["ALLOW_RELEASE_ASSET_REPLACE"] = "true"
+        with patch.object(assets.sys, "argv", ["assets", "publish", "*.tar.gz*"]), \
+             patch.object(assets, "release", return_value={"assets": [
+                 {"name": archive.name}, {"name": checksum.name}
+             ]}), \
+             patch.object(assets.subprocess, "run") as transfer:
+            with self.assertRaisesRegex(SystemExit, "digest mismatch"):
+                assets.main()
+            transfer.assert_not_called()
 
     def test_preserves_existing_archive_and_its_checksum(self):
         for name in ("old.tar.gz", "old.tar.gz.sha256"):
@@ -232,6 +272,7 @@ class HeadlessPublicationTests(unittest.TestCase):
             "RELEASE_TAG": "v0.4.6-rc.1", "RELEASE_VERSION": "0.4.6-rc.1",
             "IMAGE": "ghcr.io/example/music-player", "GITHUB_ACTOR": "actor",
             "GH_TOKEN": "test-token", "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1",
+            "ALLOW_RELEASE_ASSET_REPLACE": "false", "ALLOW_IMAGE_TAG_REPLACE": "false",
         })
         env.start()
         self.addCleanup(env.stop)
@@ -268,7 +309,7 @@ class HeadlessPublicationTests(unittest.TestCase):
             raise SystemExit("remote verification failed")
 
         with patch.object(headless, "run", side_effect=read), \
-             patch.object(headless, "require_missing") as missing, \
+             patch.object(headless, "require_replacable") as missing, \
              patch.object(headless.subprocess, "run") as write, \
              patch.object(headless, "verify_uploaded_files", side_effect=verify) as verified:
             with self.assertRaisesRegex(SystemExit, "remote verification failed"):
@@ -278,6 +319,44 @@ class HeadlessPublicationTests(unittest.TestCase):
             self.assertTrue(any(call.args[0][:3] == ["gh", "release", "upload"] for call in write.call_args_list))
             self.assertTrue(all("--clobber" not in call.args[0] for call in write.call_args_list))
             write.assert_called_with(["docker", "logout", "ghcr.io"], check=False)
+
+    def test_image_tag_replacement_requires_explicit_authorization(self):
+        existing = type("Result", (), {"returncode": 0, "stderr": ""})()
+        with patch.object(headless, "subprocess") as run:
+            run.run.return_value = existing
+            with self.assertRaisesRegex(SystemExit, "refusing to replace existing image tag"):
+                headless.require_replacable("ghcr.io/example/music-player:0.4.6-rc.1")
+            run.run.assert_called_once()
+        with patch.dict(os.environ, {"ALLOW_IMAGE_TAG_REPLACE": "true"}), \
+             patch.object(headless, "subprocess") as run:
+            headless.require_replacable("ghcr.io/example/music-player:0.4.6-rc.1")
+            run.run.assert_not_called()
+
+    def test_existing_headless_assets_require_separate_replacement_permission(self):
+        files = write_pair(self.out / "package.tar.gz")
+        existing = json.dumps({"assets": [{"name": path.name} for path in files]})
+        with patch.object(headless, "run", return_value=existing), \
+             patch.object(headless.subprocess, "run") as transfer:
+            with self.assertRaisesRegex(SystemExit, "refusing to replace release assets"):
+                headless.main()
+            transfer.assert_not_called()
+        with patch.dict(os.environ, {"ALLOW_RELEASE_ASSET_REPLACE": "true"}), \
+             patch.object(headless, "run", return_value=existing), \
+             patch.object(headless.subprocess, "run") as transfer:
+            # Stop at login, after the authorized collision deletion.
+            transfer.side_effect = [None, None, RuntimeError("stop before Docker")]
+            with self.assertRaisesRegex(RuntimeError, "stop before Docker"):
+                headless.main()
+            self.assertEqual([call.args[0] for call in transfer.call_args_list[:2]], [
+                ["gh", "release", "delete-asset", "v0.4.6-rc.1", path.name, "--yes"]
+                for path in files
+            ])
+
+    def test_image_replacement_probe_failure_still_fails_closed(self):
+        with patch.object(headless, "subprocess") as run:
+            run.run.return_value = type("Result", (), {"returncode": 1, "stderr": "network timeout"})()
+            with self.assertRaisesRegex(SystemExit, "cannot establish that"):
+                headless.require_replacable("ghcr.io/example/music-player:0.4.6-rc.1")
 
 
 if __name__ == "__main__":

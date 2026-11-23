@@ -158,8 +158,10 @@ does not bundle Snapserver.
 
 `/data` stores configuration, SQLite, covers and cache; persist it across
 replacements. All of `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and
-`MUSIC_PLAYER_APPLICATION_DIRECTORY` are set consistently by the image. Merely
-changing the application directory does not relocate settings/SQLite.
+`MUSIC_PLAYER_APPLICATION_DIRECTORY` are set consistently by the image. As of
+`0.4.7-fork.2`, the application directory also selects the settings file location
+and the default SQLite path. An explicitly configured database URL still takes
+precedence; changing the directory does not move existing data.
 `MUSIC_PLAYER_AUDIO_OUTPUT` remains configurable. Web UI is on port 5053,
 gRPC on 5051 and WebSocket on 5052. Map the ports you use.
 

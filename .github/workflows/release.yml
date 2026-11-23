@@ -49,6 +49,8 @@ jobs:
         run: python3 scripts/release-metadata.py
       - name: Test service installer account and policy handling
         run: python3 scripts/test-service-install.py
+      - name: Test release publication gates
+        run: python3 scripts/test-release-assets.py
       - name: Recheck Action releases and documentation
         env:
           GH_TOKEN: ${{ github.token }}
@@ -156,4 +158,8 @@ jobs:
           path: dist/build/image-export
           merge-multiple: true
       - name: Publish tested artifacts
+        env:
+          # Temporary replacement gate for a withdrawn version (empty by default).
+          ALLOW_IMAGE_TAG_REPLACE: ${{ vars.ALLOW_IMAGE_TAG_REPLACE }}
+          ALLOW_RELEASE_ASSET_REPLACE: ${{ vars.ALLOW_RELEASE_ASSET_REPLACE }}
         run: python3 scripts/publish-headless.py

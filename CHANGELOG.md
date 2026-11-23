@@ -8,7 +8,44 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 This file starts at 0.2.1. For earlier releases see the
 [git tags](https://github.com/tsirysndr/music-player/tags).
 
-## [0.4.7-fork.1] - Unreleased
+## [0.4.7-fork.2] - 2026-11-24
+
+Release notes: [`dist/releases/0.4.7-fork.2.md`](dist/releases/0.4.7-fork.2.md).
+
+### Fixed
+
+- Web Play/Pause now reflects confirmed server playback. Accepted commands no
+  longer leave the player showing Pause when audio failed to start.
+- Managed source failures expose safe HTTP, timeout, connection and decoder
+  diagnostics, with retry from the retained playback checkpoint. Starting a
+  stream can be cancelled through Pause.
+- Transient native Emby resolution, transport and uncertain decoder failures now
+  receive up to two bounded automatic fresh-resolution retries. Recovery keeps
+  the queue occurrence, pinned audio choice and delivered-output checkpoint;
+  Pause, Stop or Next cancels it, and exhaustion remains on the same entry for
+  explicit Play. Emby progress is not synchronized.
+  An Emby playback response with no selectable audio (for example a STRM
+  whose upstream target currently resolves to nothing) is reported as a
+  distinct "no playable audio" condition without assuming a permanent cause.
+  It receives the same bounded retries; exhaustion retains the last failure
+  reason and an explicit Play re-resolves from the saved checkpoint.
+- Playback subscriptions refresh source startup/failure status even when browser
+  background polling pauses.
+- Settings reads and audio settings writes honor
+  `MUSIC_PLAYER_APPLICATION_DIRECTORY`, allowing isolated test instances.
+
+### Added
+
+- An additive `sourcePlayback` GraphQL query and regression tests for command
+  failures, playback state reconciliation, fresh-stream resume and queue advance.
+- A loopback Emby fixture with real playback, decoding and GraphQL plus OpenCLI
+  browser acceptance for expired links, HTTP 403 retry and stalled startup.
+
+Resume uses the player's own delivered-output checkpoint and resolves a fresh
+stream. It does not synchronize Emby progress. Real Emby/STRM upstream and
+production Snapcast compatibility remain outside the local fixture's evidence.
+
+## [0.4.7-fork.1] - 2026-11-09
 
 The fork's prepared prerelease on top of upstream 0.4.7, with the fork's
 capabilities carried forward on a cleaned mainline. Upstream 0.4.7's own entries

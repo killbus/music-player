@@ -41,7 +41,6 @@ def main():
     if sys.argv[1] != "publish" or not publishing:
         raise SystemExit("Publication is not enabled")
     assets = {asset["name"] for asset in release(tag)["assets"]}
-    existing = frozenset(assets)
     files = []
     for pattern in sys.argv[2:]:
         paths = sorted(glob.glob(pattern))
@@ -49,6 +48,20 @@ def main():
             raise SystemExit(f"No files matched {pattern}")
         files.extend(Path(filename) for filename in paths)
     validate_asset_names(files)
+    # Published release assets are immutable by default. A withdrawn version
+    # under active replacement is the only supported case, gated by an
+    # explicit, temporary repository variable.
+    allow_replace = os.environ.get("ALLOW_RELEASE_ASSET_REPLACE") == "true"
+    if allow_replace:
+        # Validate every replacement pair before withdrawing any remote bytes.
+        validate_local_files(files)
+        for path in files:
+            if path.name in assets:
+                subprocess.run(["gh", "release", "delete-asset", tag, path.name, "--yes"],
+                               check=True)
+                assets.discard(path.name)
+                print(f"Replacing withdrawn asset: {path.name}")
+    existing = frozenset(assets)
     for path in files:
         if path.name not in existing and path.name + ".sha256" in existing:
             raise SystemExit(f"Release has an orphan checksum for {path.name}; inspect it before recovery")

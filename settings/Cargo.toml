@@ -1,6 +1,6 @@
 [package]
 name = "music-player-settings"
-version = "0.4.7-fork.1"
+version = "0.4.7-fork.2"
 edition = "2021"
 repository = "https://github.com/tsirysndr/music-player"
 license = "MIT"

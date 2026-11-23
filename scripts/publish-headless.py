@@ -12,7 +12,15 @@ def run(*args, **kwargs):
     return subprocess.check_output(args, text=True, **kwargs).strip()
 
 
-def require_missing(ref):
+def require_replacable(ref):
+    """Reject an existing published tag unless replacement is explicitly authorized.
+
+    Public GHCR packages do not support tag deletion, so a misissued version tag
+    can only be replaced in place. That requires a deliberate, temporary
+    repository variable; the default behavior stays refuse.
+    """
+    if os.environ.get('ALLOW_IMAGE_TAG_REPLACE') == 'true':
+        return
     result = subprocess.run(['docker', 'manifest', 'inspect', ref], text=True, capture_output=True)
     if result.returncode == 0:
         raise SystemExit(f'refusing to replace existing image tag: {ref}')
@@ -30,9 +38,16 @@ def main():
     validate_local_files(files)
     release = json.loads(run('gh', 'release', 'view', tag, '--json', 'assets'))
     existing = {asset['name'] for asset in release['assets']}
+    allow_asset_replace = os.environ.get('ALLOW_RELEASE_ASSET_REPLACE') == 'true'
     collision = existing.intersection(p.name for p in files)
-    if collision:
+    if collision and not allow_asset_replace:
         raise SystemExit(f'refusing to replace release assets: {sorted(collision)}')
+    if collision:
+        # Same replacement authorization as the image tag: delete the withdrawn
+        # asset bytes first, then the upload below republishes the new ones.
+        for name in sorted(collision):
+            subprocess.run(['gh', 'release', 'delete-asset', tag, name, '--yes'], check=True)
+            existing.discard(name)
     subprocess.run(['docker', 'login', 'ghcr.io', '-u', os.environ['GITHUB_ACTOR'], '--password-stdin'],
                    input=os.environ['GH_TOKEN'], text=True, check=True)
     try:
@@ -54,7 +69,7 @@ def main():
             subprocess.run(['docker', 'push', destination], check=True)
             digest = run('docker', 'image', 'inspect', destination, '--format', '{{index .RepoDigests 0}}')
             digests.append(digest)
-        require_missing(f'{image}:{version}')
+        require_replacable(f'{image}:{version}')
         subprocess.run(['docker', 'buildx', 'imagetools', 'create', '--tag', f'{image}:{version}', *digests], check=True)
         manifest = json.loads(run('docker', 'buildx', 'imagetools', 'inspect', '--raw', f'{image}:{version}'))
         platforms = {(m['platform']['os'], m['platform']['architecture']) for m in manifest['manifests']}

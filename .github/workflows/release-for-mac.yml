@@ -104,3 +104,5 @@ jobs:
         run: python3 scripts/release-assets.py publish '*.tar.gz*'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Temporary replacement gate for a withdrawn version (empty by default).
+          ALLOW_RELEASE_ASSET_REPLACE: ${{ vars.ALLOW_RELEASE_ASSET_REPLACE }}
