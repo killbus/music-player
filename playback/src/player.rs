@@ -28,6 +28,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tracing::error;
 
 pub type PlayerResult = Result<(), anyhow::Error>;
+pub use crate::source_playback::SourcePlaybackStatus;
 
 /// Work out a local track's key and tempo, if they are not known yet.
 ///
@@ -1332,6 +1333,10 @@ impl PlayerInternal {
             PlayerCommand::Clear => self.handle_clear(),
             PlayerCommand::GetTracks => self.handle_get_tracks(),
             PlayerCommand::GetCurrentTrack => self.handle_get_current_track(),
+            PlayerCommand::GetSourcePlayback { reply } => {
+                let status = self.source_playback.as_ref().and_then(SourcePlayback::status);
+                let _ = reply.send(status);
+            }
             PlayerCommand::PlayNext(track) => self.handle_play_next(track),
             PlayerCommand::PlaySelectedMedia {
                 track,
@@ -1948,6 +1953,9 @@ pub enum PlayerCommand {
     Clear,
     GetTracks,
     GetCurrentTrack,
+    GetSourcePlayback {
+        reply: tokio::sync::oneshot::Sender<Option<SourcePlaybackStatus>>,
+    },
     RemoveTrack(usize),
     PlayNext(Track),
     SetVolume(u16),

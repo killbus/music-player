@@ -92,7 +92,7 @@ impl SourceResolver {
                 .await
         })
         .await
-        .map_err(|_| failure("saved source resolution timed out"))?
+        .map_err(|_| ProviderError::Transport("saved source resolution timed out".into()))?
     }
 
     /// Dispatch through the saved source namespace, never the browsing provider.

@@ -77,6 +77,8 @@ pub enum Phase {
     Paused,
     Resolving,
     Opening,
+    /// Host adapter is re-resolving after a failed attempt, including backoff.
+    Recovering,
     Streaming,
     /// Clean decoder EOF, but observable output is still pending.
     Draining,
@@ -434,6 +436,12 @@ impl<K: Clone, S: SessionControl> Coordinator<K, S> {
         self.capture_and_cancel();
         self.desired = DesiredState::Stopped;
         self.phase = Phase::Stopped;
+    }
+
+    /// End a host recovery deadline without losing the frozen checkpoint.
+    pub(crate) fn fail(&mut self) {
+        self.capture_and_cancel();
+        self.phase = Phase::Failed;
     }
 
     /// Deliver on the command loop. Crucially, the engine start callback is not

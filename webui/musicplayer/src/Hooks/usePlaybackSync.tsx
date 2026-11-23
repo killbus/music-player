@@ -33,7 +33,7 @@ export const usePlaybackSync = () => {
 
   const setConnected = useSetAtom(serverConnectedAtom);
 
-  const { data: playback, isError } = useCurrentlyPlayingSongQuery(undefined, {
+  const { data: playback, dataUpdatedAt, isError } = useCurrentlyPlayingSongQuery(undefined, {
     refetchInterval: 5000,
   });
 
@@ -42,6 +42,8 @@ export const usePlaybackSync = () => {
     setConnected(!isError);
   }, [isError, setConnected]);
 
+  // A repeated server snapshot can share the same object even when a
+  // subscription changed the atom since the previous poll.
   useEffect(() => {
     if (!playback?.currentlyPlayingSong) {
       return;
@@ -61,7 +63,7 @@ export const usePlaybackSync = () => {
       progress: positionMs,
       isPlaying,
     });
-  }, [playback, setNowPlaying, setPlaybackIndex]);
+  }, [playback, dataUpdatedAt, setNowPlaying, setPlaybackIndex]);
 
   useGraphQLSubscription<TrackTimePositionChangedSubscription>(
     TrackTimePositionChangedDocument,
@@ -80,6 +82,7 @@ export const usePlaybackSync = () => {
       if (!data.playerState) return;
       const { isPlaying } = data.playerState;
       setNowPlaying((previous) => ({ ...previous, isPlaying }));
+      void queryClient.invalidateQueries({ queryKey: ["SourcePlayback"] });
     }
   );
 
@@ -107,6 +110,7 @@ export const usePlaybackSync = () => {
       queryClient.invalidateQueries({
         queryKey: useGetTracklistQuery.getKey(),
       });
+      void queryClient.invalidateQueries({ queryKey: ["SourcePlayback"] });
     }
   );
 };

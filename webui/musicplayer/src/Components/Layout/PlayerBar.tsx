@@ -24,6 +24,10 @@ export type PlayerBarProps = {
   /** Nothing is loaded: the transport is inert and the VFD shows a square. */
   stopped?: boolean;
   playing?: boolean;
+  starting?: boolean;
+  controlPending?: boolean;
+  playbackError?: string | null;
+  playbackMessage?: string | null;
   /** Milliseconds. */
   progress?: number;
   duration?: number;
@@ -85,6 +89,10 @@ const PlayerBar = ({
   cover,
   stopped = !title,
   playing,
+  starting,
+  controlPending,
+  playbackError,
+  playbackMessage,
   progress = 0,
   duration = 0,
   isRadio,
@@ -180,6 +188,11 @@ const PlayerBar = ({
             className="text-[13px] font-semibold text-fg"
           />
           <MarqueeText text={subtitle} className="text-[11px] text-dim" />
+          {(playbackError || playbackMessage) && (
+            <span role={playbackError ? "alert" : "status"} className="text-[11px] text-fg">
+              {playbackError ?? playbackMessage}
+            </span>
+          )}
         </div>
         {!stopped && (
           <LikeButton
@@ -214,10 +227,12 @@ const PlayerBar = ({
             />
           )}
           <PlayPauseButton
-            playing={playing}
+            playing={playing || starting}
+            aria-label={starting ? "Cancel playback startup" : playing ? "Pause" : "Play"}
+            disabled={controlPending}
             size={40}
             className="lg:size-11"
-            onClick={playing ? onPause : onPlay}
+            onClick={playing || starting ? onPause : onPlay}
           />
           {!isRadio && (
             <IconButton

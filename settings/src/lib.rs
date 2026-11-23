@@ -232,13 +232,7 @@ fn default_device_id() -> String {
 }
 
 pub fn read_settings() -> Result<Config, ConfigError> {
-    let path = match env::consts::OS {
-        "android" => "/storage/emulated/0/Android/data/com.tsirysndr.songbird/files".to_owned(),
-        _ => {
-            let config_dir = dirs::config_dir().unwrap();
-            format!("{}/music-player", config_dir.to_str().unwrap())
-        }
-    };
+    let path = application_directory();
 
     let music_directory = match env::consts::OS {
         "android" => "/storage/emulated/0/Music".to_owned(),
@@ -357,13 +351,7 @@ pub fn read_settings() -> Result<Config, ConfigError> {
 /// untouched (the file is edited in place, not regenerated, so manual
 /// edits and comments outside `[audio]` survive as much as toml allows).
 pub fn save_audio_settings(audio: &AudioSettings) -> std::io::Result<()> {
-    let path = match env::consts::OS {
-        "android" => "/storage/emulated/0/Android/data/com.tsirysndr.songbird/files".to_owned(),
-        _ => {
-            let config_dir = dirs::config_dir().unwrap();
-            format!("{}/music-player", config_dir.to_str().unwrap())
-        }
-    };
+    let path = application_directory();
     let settings_path = format!("{}/settings.toml", path);
     let contents = fs::read_to_string(&settings_path).unwrap_or_default();
     let mut doc: toml::Value =
@@ -381,15 +369,18 @@ pub fn save_audio_settings(audio: &AudioSettings) -> std::io::Result<()> {
     )
 }
 
-pub fn get_application_directory() -> String {
-    let config_dir = match env::consts::OS {
+fn application_directory() -> String {
+    env::var("MUSIC_PLAYER_APPLICATION_DIRECTORY").unwrap_or_else(|_| match env::consts::OS {
         "android" => "/storage/emulated/0/Android/data/com.tsirysndr.songbird/files".to_owned(),
         _ => {
             let config_dir = dirs::config_dir().unwrap();
             format!("{}/music-player", config_dir.to_str().unwrap())
         }
-    };
-    let path = env::var("MUSIC_PLAYER_APPLICATION_DIRECTORY").unwrap_or(config_dir);
+    })
+}
+
+pub fn get_application_directory() -> String {
+    let path = application_directory();
     let albums = format!("{}/albums", path);
     let artists = format!("{}/artists", path);
     let playlists = format!("{}/playlists", path);

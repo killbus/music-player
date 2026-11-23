@@ -522,7 +522,7 @@ async fn failed_selection_after_session_allocation_releases_that_session() {
         })
     })
     .await;
-    assert!(matches!(result, Err(ProviderError::Other(message))
+    assert!(matches!(result, Err(ProviderError::Upstream(message))
         if message == "the selected Emby audio stream is unavailable"));
     cleanup_finished(&client).await;
     fixture.idle(4).await;

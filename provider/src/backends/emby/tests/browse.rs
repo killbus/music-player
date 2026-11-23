@@ -320,7 +320,7 @@ async fn recursive_queue_rejects_later_http_error_without_returning_partial_trac
             let failed = fixture.reply("GET", LIST_PATH, 500, None, b"{}").await;
             assert_listing(&failed, "season", true, 1, 500);
         });
-        assert!(matches!(result, Err(ProviderError::Other(message))
+    assert!(matches!(result, Err(ProviderError::Upstream(message))
             if message == "Emby answered HTTP 500"));
         fixture.idle(3).await;
     })

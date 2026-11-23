@@ -1,10 +1,15 @@
 import _ from "lodash";
-import { useQueryClient } from "@tanstack/react-query";
-import { useAtomValue, useSetAtom } from "jotai";
+import { useIsMutating, useQueryClient } from "@tanstack/react-query";
+import { useAtom, useAtomValue, useSetAtom } from "jotai";
+import { fetcher } from "../Api/fetcher";
 import { resourceUriResolver } from "../ResourceUriResolver";
-import { nowPlayingAtom, playbackIndexAtom, playbackPositionAtom } from "../State";
+import { nowPlayingAtom, playbackControlErrorAtom, playbackIndexAtom, playbackPositionAtom } from "../State";
 import { Track } from "../Types";
 import {
+  PauseDocument,
+  PauseMutation,
+  PlayDocument,
+  PlayMutation,
   PlayAlbumMutationVariables,
   PlayArtistTracksMutationVariables,
   PlayNextMutationVariables,
@@ -39,10 +44,25 @@ const toTrack = (track: any): Track => ({
       : track.album.cover!,
 });
 
+const controlKey = ["PlaybackControl"] as const;
+
+async function sendControl<T>(document: string, field: keyof T): Promise<T> {
+  const signal = AbortSignal.timeout(10000);
+  try {
+    const result = await fetcher<T, Record<string, never>>(document, {}, undefined, signal)();
+    if (!result[field]) throw new Error("The player did not accept the playback command.");
+    return result;
+  } catch (error) {
+    if (signal.aborted) throw new Error("Playback command timed out; outcome uncertain. Check playback status before retrying.");
+    throw error;
+  }
+}
+
 export const usePlayback = () => {
   const nowPlaying = useAtomValue(nowPlayingAtom);
   const index = useAtomValue(playbackIndexAtom);
-  const setNowPlaying = useSetAtom(nowPlayingAtom);
+  const [controlError, setControlError] = useAtom(playbackControlErrorAtom);
+  const controlPending = useIsMutating({ mutationKey: controlKey }) > 0;
   const setPosition = useSetAtom(playbackPositionAtom);
   const queryClient = useQueryClient();
 
@@ -53,10 +73,24 @@ export const usePlayback = () => {
     queryClient.invalidateQueries({
       queryKey: useGetTracklistQuery.getKey(),
     });
+    queryClient.invalidateQueries({ queryKey: ["SourcePlayback"] });
   };
 
-  const playMutation = usePlayMutation({ onSuccess: invalidatePlayback });
-  const pauseMutation = usePauseMutation({ onSuccess: invalidatePlayback });
+  const controlOptions = {
+    mutationKey: controlKey,
+    retry: false,
+    onMutate: () => setControlError(null),
+    onError: (error: Error) => setControlError(error.message),
+    onSettled: invalidatePlayback,
+  };
+  const playMutation = usePlayMutation<Error>({
+    ...controlOptions,
+    mutationFn: () => sendControl<PlayMutation>(PlayDocument, "play"),
+  });
+  const pauseMutation = usePauseMutation<Error>({
+    ...controlOptions,
+    mutationFn: () => sendControl<PauseMutation>(PauseDocument, "pause"),
+  });
   const nextMutation = useNextMutation({ onSuccess: invalidatePlayback });
   const previousMutation = usePreviousMutation({
     onSuccess: invalidatePlayback,
@@ -91,13 +125,12 @@ export const usePlayback = () => {
     queue?.tracklistTracks?.previousTracks?.map(toTrack) || [];
 
   const play = () => {
-    setNowPlaying((previous) => ({ ...previous, isPlaying: true }));
-    return playMutation.mutateAsync({});
+    // Acceptance only enqueues a command. Playback is confirmed by the daemon.
+    if (!queryClient.isMutating({ mutationKey: controlKey })) playMutation.mutate({});
   };
 
   const pause = () => {
-    setNowPlaying((previous) => ({ ...previous, isPlaying: false }));
-    return pauseMutation.mutateAsync({});
+    if (!queryClient.isMutating({ mutationKey: controlKey })) pauseMutation.mutate({});
   };
 
   const seek = (positionMs: number) => {
@@ -112,6 +145,8 @@ export const usePlayback = () => {
     index,
     nextTracks,
     previousTracks,
+    controlError,
+    controlPending,
     play,
     pause,
     seek,

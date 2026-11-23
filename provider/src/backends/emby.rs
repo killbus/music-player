@@ -259,7 +259,11 @@ impl Emby {
                 200..=299 => Ok(response),
                 401 | 403 => Err(ProviderError::Auth("Emby refused this session".into())),
                 404 => Err(ProviderError::NotFound("Emby resource".into())),
-                _ => Err(other(format!("Emby answered HTTP {}", status.as_u16()))),
+                // Respect rate limiting; retrying requires Retry-After support.
+                429 => Err(other("Emby rate limited this request")),
+                _ => Err(ProviderError::Upstream(format!(
+                    "Emby answered HTTP {}", status.as_u16()
+                ))),
             };
         }
         unreachable!()
@@ -283,7 +287,8 @@ impl Emby {
             bytes.extend_from_slice(&chunk);
         }
         // Serde errors can quote server-provided values; use a fixed diagnostic.
-        serde_json::from_slice(&bytes).map_err(|_| other("invalid Emby metadata response"))
+        serde_json::from_slice(&bytes)
+            .map_err(|_| ProviderError::Upstream("invalid Emby metadata response".into()))
     }
 
     pub(crate) async fn delete_encoding(&self, play_session_id: &str) -> Result<(), ProviderError> {

@@ -111,6 +111,13 @@ pub enum ProviderError {
     NotFound(String),
     Auth(String),
     Transport(String),
+    /// An upstream playback/metadata response could not be used. This does not
+    /// establish a permanent cause; a host may retry with a bounded budget.
+    Upstream(String),
+    /// The current playback response exposed no selectable audio. This does
+    /// not establish whether the upstream failure is permanent; a host may
+    /// retry within its bounded recovery budget while retaining this reason.
+    NoAudioStream(String),
     Other(String),
 }
 
@@ -133,6 +140,8 @@ impl fmt::Display for ProviderError {
             ProviderError::NotFound(what) => write!(f, "not found: {what}"),
             ProviderError::Auth(why) => write!(f, "authentication failed: {why}"),
             ProviderError::Transport(why) => write!(f, "{why}"),
+            ProviderError::Upstream(why) => write!(f, "{why}"),
+            ProviderError::NoAudioStream(what) => write!(f, "{what}"),
             ProviderError::Other(why) => write!(f, "{why}"),
         }
     }

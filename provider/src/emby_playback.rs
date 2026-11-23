@@ -131,16 +131,22 @@ impl Emby {
         let session_id = info
             .play_session_id
             .filter(|id| !id.is_empty())
-            .ok_or_else(|| failure("Emby did not issue a playback session identity"))?;
+            .ok_or_else(|| ProviderError::Upstream("Emby did not issue a playback session identity".into()))?;
         let lease = EncodingLease {
             client: self.clone(),
             session_id: Some(session_id.clone()),
             runtime,
         };
         if info.error_code.is_some() {
-            return Err(failure("Emby refused audio playback resolution"));
+            return Err(ProviderError::Upstream("Emby refused audio playback resolution".into()));
         }
-        let pin = select(&info.media_sources, selection)?;
+        // Missing audio or a selection mismatch does not establish a permanent
+        // cause. Keep the no-audio diagnostic distinct across bounded retries.
+        let pin = select(&info.media_sources, selection)
+            .map_err(|error| match error {
+                ProviderError::NoAudioStream(why) => ProviderError::NoAudioStream(why),
+                error => ProviderError::Upstream(error.to_string()),
+            })?;
         if offset_ticks > 0 && pin.runtime_ticks.is_none() {
             return Err(failure(
                 "this Emby source has no confirmed finite seek timeline",
@@ -201,7 +207,15 @@ fn select(sources: &[MediaSource], selection: &AudioSelection) -> Result<AudioPi
                     .find(|source| source.media_streams.iter().any(|stream| stream.is_audio()))
             }),
     }
-    .ok_or_else(|| failure("the selected Emby media source is unavailable"))?;
+    .ok_or_else(|| {
+        if sources.iter().any(|source| source.media_streams.iter().any(|stream| stream.is_audio())) {
+            ProviderError::Upstream("the selected Emby media source is unavailable".into())
+        } else {
+            ProviderError::NoAudioStream(
+                "Emby exposed no playable audio for this item; the source is unavailable".into(),
+            )
+        }
+    })?;
     source.check_source(sources)?;
     let index = wanted
         .map(|(_, index)| index)
@@ -218,7 +232,15 @@ fn select(sources: &[MediaSource], selection: &AudioSelection) -> Result<AudioPi
             .find(|stream| stream.is_audio() && stream.is_default)
             .or_else(|| source.media_streams.iter().find(|stream| stream.is_audio()))
     }
-    .ok_or_else(|| failure("the selected Emby audio stream is unavailable"))?;
+    .ok_or_else(|| {
+        if source.media_streams.iter().any(|stream| stream.is_audio()) {
+            ProviderError::Upstream("the selected Emby audio stream is unavailable".into())
+        } else {
+            ProviderError::NoAudioStream(
+                "Emby exposed no playable audio for this item; the source is unavailable".into(),
+            )
+        }
+    })?;
     source.check_stream(audio)?;
     let pin = AudioPin {
         media_source_id: source.id.clone(),
@@ -438,6 +460,56 @@ mod tests {
             }
         )
         .is_err());
+    }
+
+    #[test]
+    fn empty_metadata_is_reported_as_no_audio_not_a_generic_failure() {
+        // Empty metadata gets a specific diagnostic without inferring whether
+        // the upstream probe failure is permanent.
+        let mut empty = target();
+        empty.media_streams.clear();
+        let error = select(&[empty], &AudioSelection::Auto).unwrap_err();
+        assert!(matches!(error, ProviderError::NoAudioStream(_)));
+
+        // A response that does carry audio, but where the pin no longer
+        // matches, stays an Upstream condition the host may retry.
+        let error = select(
+            &[target()],
+            &AudioSelection::Explicit {
+                media_source_id: "missing".into(),
+                audio_stream_index: 1
+            },
+        ).unwrap_err();
+        assert!(matches!(error, ProviderError::Upstream(_)));
+
+        // An audio stream that exists but is not the pinned one: same.
+        let mut shifted = target();
+        shifted.media_streams[1].index = 9;
+        let error = select(
+            &[shifted],
+            &AudioSelection::Pinned(AudioPin {
+                media_source_id: "mediasource_55508".into(),
+                audio_stream_index: 1,
+                runtime_ticks: Some(191429666670),
+                etag: None,
+                codec: Some("aac".into()),
+                channels: Some(2),
+                sample_rate: Some(44100),
+            }),
+        ).unwrap_err();
+        assert!(matches!(error, ProviderError::Upstream(_)));
+
+        // An empty explicit selection against empty metadata is still no-audio.
+        let mut no_streams = target();
+        no_streams.media_streams.clear();
+        let error = select(
+            &[no_streams],
+            &AudioSelection::Explicit {
+                media_source_id: "mediasource_55508".into(),
+                audio_stream_index: 0
+            },
+        ).unwrap_err();
+        assert!(matches!(error, ProviderError::NoAudioStream(_)));
     }
 
     #[test]

@@ -18,6 +18,7 @@ export const nowPlayingAtom = atom<NowPlaying>({
 });
 
 export const playbackIndexAtom = atom<number | undefined>(undefined);
+export const playbackControlErrorAtom = atom<string | null>(null);
 
 export const playbackPositionAtom = atom(
   (get) => get(nowPlayingAtom).progress,

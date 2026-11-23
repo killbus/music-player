@@ -21,6 +21,7 @@ export const emptyTracklist = {
 };
 
 export const handlers = [
+  graphql.query("SourcePlayback", () => HttpResponse.json({ data: { sourcePlayback: null } })),
   graphql.query("PlaybackModes", () => HttpResponse.json({ data: {
     playbackModes: { available: true, unavailableReason: null, shuffle: false, repeat: "OFF" },
   } })),

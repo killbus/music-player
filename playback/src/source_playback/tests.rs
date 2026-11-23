@@ -46,6 +46,127 @@ fn legacy_source(revision: u64) -> SourceHandle {
 }
 
 #[tokio::test]
+async fn recovery_deadline_cancels_inflight_resolution_and_preserves_checkpoint() {
+    let mut player = bridge_player().await;
+    player.load(source("item"), Duration::from_millis(1200), false).unwrap();
+    let request = player.coordinator.play().unwrap().unwrap();
+    player.sender.try_send((request, Err(ProviderError::Upstream("incomplete metadata".into())))).ok().unwrap();
+    player.poll_with(|_| panic!("failed metadata must not open a stream"));
+    let now = Instant::now();
+    player.recover(now);
+    assert_eq!(player.snapshot().phase, Phase::Recovering);
+    let checkpoint = player.checkpoint().unwrap();
+    player.recover(now + Duration::from_secs(2));
+    assert_eq!(player.coordinator.snapshot().phase, Phase::Resolving);
+    assert!(player.task.is_some());
+    assert!(player.expire_recovery(now + Duration::from_secs(45)));
+    assert!(player.task.is_none());
+    assert_eq!(player.snapshot().phase, Phase::Failed);
+    assert_eq!(player.checkpoint().unwrap().offset_ms, checkpoint.offset_ms);
+    assert_eq!(player.checkpoint().unwrap().occurrence_id, checkpoint.occurrence_id);
+    assert!(player.error().unwrap().contains("timed out"));
+    player.recover(now + Duration::from_secs(60));
+    assert!(player.task.is_none());
+}
+
+#[tokio::test]
+async fn pause_cancels_inflight_recovery_and_discards_late_failure() {
+    let mut player = bridge_player().await;
+    player.load(source("item"), Duration::from_millis(1200), false).unwrap();
+    let request = player.coordinator.play().unwrap().unwrap();
+    player.sender.try_send((request.clone(), Err(ProviderError::Upstream("missing audio".into())))).ok().unwrap();
+    player.poll_with(|_| panic!("unexpected start"));
+    let now = Instant::now();
+    player.recover(now);
+    player.recover(now + Duration::from_secs(2));
+    assert_eq!(player.coordinator.snapshot().phase, Phase::Resolving);
+    player.pause();
+    player.sender.try_send((request, Err(ProviderError::Transport("late response".into())))).ok().unwrap();
+    player.poll_with(|_| panic!("cancelled request started audio"));
+    player.recover(now + Duration::from_secs(5));
+    assert_eq!(player.snapshot().phase, Phase::Paused);
+    assert_eq!(player.checkpoint().unwrap().offset_ms, 1200);
+    assert!(player.error().is_none());
+    assert!(player.task.is_none());
+    assert_eq!(player.recovery.attempt, 0);
+}
+
+#[tokio::test]
+async fn missing_audio_in_metadata_receives_bounded_recovery() {
+    // A probe may temporarily return no audio; the response alone cannot
+    // establish a permanent failure.
+    let mut player = bridge_player().await;
+    player.load(source("item"), Duration::from_millis(1200), false).unwrap();
+    let request = player.coordinator.play().unwrap().unwrap();
+    player.sender.try_send((request, Err(ProviderError::NoAudioStream(
+        "Emby exposed no playable audio for this item; the source is unavailable".into(),
+    )))).ok().unwrap();
+    player.poll_with(|_| panic!("metadata failure must not open a stream"));
+    player.recover(Instant::now());
+    assert_eq!(player.snapshot().phase, Phase::Recovering);
+    assert_eq!(player.recovery.attempt, 1);
+    assert_eq!(player.checkpoint().unwrap().offset_ms, 1200);
+}
+
+#[tokio::test]
+async fn exhausted_metadata_recovery_preserves_reason_and_explicit_resume() {
+    let mut player = bridge_player().await;
+    player.load(source("item"), Duration::from_millis(1200), false).unwrap();
+    let request = player.coordinator.play().unwrap().unwrap();
+    player
+        .sender
+        .try_send((
+            request,
+            Err(ProviderError::NoAudioStream(
+                "Emby exposed no playable audio for this item; the source is unavailable".into(),
+            )),
+        ))
+        .ok()
+        .unwrap();
+    player.poll_with(|_| panic!("metadata failure must not open a stream"));
+    let now = Instant::now();
+    // Two previous automatic attempts have already consumed this budget.
+    assert!(player.recovery.schedule(now, Duration::ZERO));
+    assert!(player.recovery.schedule(now, Duration::ZERO));
+    player.recovery.retry_at = None;
+    player.recover(now);
+    assert_eq!(player.snapshot().phase, Phase::Failed);
+    assert_eq!(player.recovery.attempt, RETRY_LIMIT);
+    assert!(!player.recovery.active);
+    assert_eq!(
+        player.error().as_deref(),
+        Some("Playback recovery attempts failed. Last failure: Emby exposed no playable audio for this item; the source is unavailable. Press Play to retry from the saved position.")
+    );
+    // Later ticks must not start re-resolving either.
+    player.recover(now + Duration::from_secs(30));
+    assert!(player.task.is_none());
+    assert_eq!(player.recovery.attempt, RETRY_LIMIT);
+    // An explicit Play still re-resolves from the retained checkpoint.
+    player.play().unwrap();
+    assert_eq!(player.coordinator.snapshot().phase, Phase::Resolving);
+    assert_eq!(player.checkpoint().unwrap().offset_ms, 1200);
+    assert_eq!(player.recovery.attempt, 0);
+}
+
+#[tokio::test]
+async fn transient_upstream_failure_still_schedules_automatic_recovery() {
+    // Generic incomplete responses retain the same bounded recovery policy.
+    let mut player = bridge_player().await;
+    player.load(source("item"), Duration::from_millis(1200), false).unwrap();
+    let request = player.coordinator.play().unwrap().unwrap();
+    player
+        .sender
+        .try_send((request, Err(ProviderError::Upstream("incomplete metadata".into()))))
+        .ok()
+        .unwrap();
+    player.poll_with(|_| panic!("failed metadata must not open a stream"));
+    let now = Instant::now();
+    player.recover(now);
+    assert_eq!(player.snapshot().phase, Phase::Recovering);
+    assert_eq!(player.recovery.attempt, 1);
+}
+
+#[tokio::test]
 async fn legacy_load_knows_no_seek_before_resolution_and_rejects_invalid_replacement() {
     let mut player = playback().await;
     player
@@ -310,6 +431,9 @@ async fn bridge_player_with_session<S: SessionControl>() -> SourcePlayback<S> {
         completed,
         sender,
         error: None,
+        observation: None,
+        recovery: Recovery::default(),
+        retryable: false,
     }
 }
 
@@ -619,5 +743,35 @@ async fn bridge_open_failure_releases_once_and_preserves_requested_selection() {
     assert_eq!(released.load(Ordering::SeqCst), 1);
     assert_eq!(player.checkpoint().unwrap().selection, selection);
     drop(player);
+    assert_eq!(released.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn submillisecond_pcm_offset_resumes_without_target_mismatch_rejection() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    let mut player = bridge_player().await;
+    let target = Duration::from_nanos(1_200_500_000); // 1200ms + 500µs from PCM frames
+    player.load(source("item"), target, false).unwrap();
+    let request = player.coordinator.play().unwrap().unwrap();
+    assert_eq!(request.target(), target);
+    let released = Arc::new(AtomicUsize::new(0));
+    let descriptor = bridge_descriptor(None, released.clone());
+    assert_eq!(descriptor.requested_offset_ms, 1200);
+    assert!(player
+        .sender
+        .try_send((request, Ok(descriptor)))
+        .is_ok());
+    let mut starts = 0;
+    player.poll_with(|_| {
+        starts += 1;
+        Ok(BridgeSession)
+    });
+    assert_eq!(starts, 1);
+    assert_eq!(player.snapshot().phase, Phase::Streaming);
+    assert!(player.error().is_none());
+    player.stop();
     assert_eq!(released.load(Ordering::SeqCst), 1);
 }

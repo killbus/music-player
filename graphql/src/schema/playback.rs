@@ -14,6 +14,7 @@ use super::objects::{
     current_track::CurrentlyPlayingSong,
     player_runtime::{player_runtime, PlayerRuntimeType},
     player_state::PlayerState,
+    source_playback::SourcePlayback,
     track::Track,
 };
 use crate::require_local_player_ready;
@@ -24,6 +25,30 @@ pub struct PlaybackQuery;
 
 #[Object]
 impl PlaybackQuery {
+    /// Managed source state; playerRuntime describes output startup only.
+    async fn source_playback(&self, ctx: &Context<'_>) -> Result<Option<SourcePlayback>, Error> {
+        let device = ctx
+            .data::<Arc<TokioMutex<CurrentReceiverDevice>>>()?
+            .lock()
+            .await;
+        if device.client.is_some() || device.receiver_device.is_some() {
+            return Ok(None);
+        }
+        drop(device);
+        require_local_player_ready(ctx)?;
+        let (reply, received) = tokio::sync::oneshot::channel();
+        ctx.data::<Arc<Mutex<UnboundedSender<PlayerCommand>>>>()?
+            .lock()
+            .unwrap()
+            .send(PlayerCommand::GetSourcePlayback { reply })
+            .map_err(|_| Error::new("Player command channel closed"))?;
+        let status = tokio::time::timeout(Duration::from_secs(2), received)
+            .await
+            .map_err(|_| Error::new("Playback status timed out"))?
+            .map_err(|_| Error::new("Playback status channel closed"))?;
+        Ok(status.map(Into::into))
+    }
+
     async fn player_runtime(&self, ctx: &Context<'_>) -> Result<PlayerRuntimeType, Error> {
         let runtime = ctx
             .data::<PlayerRuntimeHandle>()

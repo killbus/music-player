@@ -7,6 +7,7 @@ pub mod folder;
 pub mod genre;
 pub mod lyrics;
 pub mod player_runtime;
+pub mod source_playback;
 pub mod player_state;
 pub mod playlist;
 pub mod search_result;

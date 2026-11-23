@@ -2,12 +2,15 @@
 //! currently browsed provider, and no transient URL enters the engine queue.
 use crate::{managed::*, source_descriptor::SourceDescriptor, source_resolver::SourceResolver};
 use music_player_provider::ProviderError;
-use music_player_transport::{HttpReader, HttpRequest};
+use music_player_transport::{HttpReader, HttpRequest, TransportHandle, TransportTerminal};
 use music_player_types::audio::AudioSelection;
 use music_player_types::source::{ResourceKind, SourceHandle};
 use rockbox_playback::{Metadata, Player as Engine, StreamSession};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::{sync::mpsc, task::JoinHandle};
+
+mod recovery;
+use recovery::{Recovery, RETRY_LIMIT};
 
 #[derive(Clone)]
 struct Occurrence {
@@ -18,6 +21,23 @@ type Completion = (
     ResolveRequest<Occurrence>,
     Result<SourceDescriptor, ProviderError>,
 );
+
+/// Current source attempt, independent of output initialization. Contains no
+/// temporary media URLs, request headers or credentials.
+#[derive(Clone, Debug)]
+pub struct SourcePlaybackStatus {
+    pub source: String,
+    pub occurrence_id: String,
+    pub phase: Phase,
+    pub error: Option<String>,
+    pub retry_attempt: u32,
+    pub retry_limit: u32,
+}
+
+struct StreamObservation {
+    session: StreamSession,
+    transport: TransportHandle,
+}
 
 /// No URL, headers or session token. Offset is an output delivery estimate.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -79,6 +99,9 @@ pub(crate) struct SourcePlayback<S: SessionControl = StreamSession> {
     completed: mpsc::Receiver<Completion>,
     sender: mpsc::Sender<Completion>,
     error: Option<String>,
+    observation: Option<StreamObservation>,
+    recovery: Recovery,
+    retryable: bool,
 }
 impl SourcePlayback {
     pub fn new(resolver: SourceResolver) -> Self {
@@ -92,6 +115,9 @@ impl SourcePlayback {
             completed,
             sender,
             error: None,
+            observation: None,
+            recovery: Recovery::default(),
+            retryable: false,
         }
     }
 }
@@ -100,10 +126,25 @@ impl<S: SessionControl> SourcePlayback<S> {
         self.occurrence.is_some()
     }
     pub fn snapshot(&self) -> Snapshot {
-        self.coordinator.snapshot()
+        let mut snapshot = self.coordinator.snapshot();
+        if self.recovery.active {
+            snapshot.phase = Phase::Recovering;
+        }
+        snapshot
     }
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+    pub fn status(&self) -> Option<SourcePlaybackStatus> {
+        let occurrence = self.occurrence.as_ref()?;
+        Some(SourcePlaybackStatus {
+            source: occurrence.source.to_handle(),
+            occurrence_id: occurrence.id.clone(),
+            phase: self.snapshot().phase,
+            error: if self.recovery.active { None } else { self.error.clone() },
+            retry_attempt: self.recovery.attempt,
+            retry_limit: RETRY_LIMIT,
+        })
     }
     pub fn accepted_pin(&self) -> Option<(&str, &music_player_types::audio::AudioPin)> {
         let AudioSelection::Pinned(pin) = &self.selection else {
@@ -148,6 +189,7 @@ impl<S: SessionControl> SourcePlayback<S> {
         // Restore is entirely local and paused. Authentication is deferred
         // until Play; it then checks the saved selection and current account.
         self.cancel_task();
+        self.recovery = Recovery::default();
         let occurrence = Occurrence {
             id: checkpoint.occurrence_id,
             source,
@@ -212,6 +254,7 @@ impl<S: SessionControl> SourcePlayback<S> {
             source,
         };
         self.selection = selection;
+        self.recovery = Recovery::default();
         self.error = None;
         let request = self.coordinator.load_with_capabilities(
             occurrence.clone(),
@@ -224,22 +267,31 @@ impl<S: SessionControl> SourcePlayback<S> {
         Ok(())
     }
     pub fn play(&mut self) -> Result<(), ControlError> {
+        // Redundant Play cannot bypass backoff or replenish its budget.
+        if self.recovery.active {
+            return Ok(());
+        }
         let request = self.coordinator.play().inspect_err(|error| {
             self.error = Some(error.to_string());
         })?;
         // Repeated play must not abort the currently valid resolve.
         if request.is_some() {
+            self.recovery = Recovery::default();
             self.launch(request);
         }
         Ok(())
     }
     pub fn pause(&mut self) {
+        self.recovery = Recovery::default();
         self.coordinator.pause();
         self.cancel_task();
+        self.error = None;
     }
     pub fn stop(&mut self) {
+        self.recovery = Recovery::default();
         self.coordinator.stop();
         self.cancel_task();
+        self.error = None;
     }
     pub fn clear(&mut self) {
         self.stop();
@@ -252,10 +304,13 @@ impl<S: SessionControl> SourcePlayback<S> {
         let request = self.coordinator.seek(target).inspect_err(|error| {
             self.error = Some(error.to_string());
         })?;
+        self.recovery = Recovery::default();
         self.launch(request);
         Ok(())
     }
     fn cancel_task(&mut self) {
+        self.retryable = false;
+        self.observation = None;
         if let Some(task) = self.task.take() {
             task.abort();
         }
@@ -296,11 +351,74 @@ impl<S: SessionControl> SourcePlayback<S> {
         }));
     }
 
+    fn expire_recovery(&mut self, now: Instant) -> bool {
+        if !self.recovery.active || !self.recovery.expired(now) { return false; }
+        self.coordinator.fail();
+        self.cancel_task();
+        self.recovery.finish();
+        self.error = Some("Playback recovery timed out. Press Play to retry from the saved position.".into());
+        true
+    }
+
+    fn recover(&mut self, now: Instant) {
+        let snapshot = self.coordinator.snapshot();
+        if snapshot.phase == Phase::Ended {
+            self.recovery.finish();
+            return;
+        }
+        let native_emby = self.occurrence.as_ref().is_some_and(|o| {
+            matches!(o.source, SourceHandle::Remote(_)) && o.source.resolver() == "emby"
+        });
+        if native_emby && snapshot.phase == Phase::EndUnconfirmed
+            && matches!(snapshot.capabilities.map(|c| c.timeline), Some(Timeline::Finite { .. }))
+            && self.error.is_none()
+        {
+            self.coordinator.fail();
+            self.retryable = true;
+            self.error = Some("Audio ended before the expected duration. Press Play to resume.".into());
+        }
+        if snapshot.is_playing() {
+            if let Some(position) = snapshot.position.filter(|p| Some(p.generation) == snapshot.generation) {
+                self.recovery.observe(position, now);
+            }
+        } else if self.coordinator.snapshot().phase == Phase::Failed && self.recovery.retry_at.is_none() {
+            let retryable = std::mem::take(&mut self.retryable);
+            if retryable && native_emby && snapshot.desired == DesiredState::Playing {
+                let jitter = Duration::from_millis(u64::from(uuid::Uuid::new_v4().as_bytes()[0]) % 251);
+                if !self.recovery.schedule(now, jitter) {
+                    let reason = self.error.as_deref().unwrap_or("Audio source failed");
+                    self.error = Some(format!(
+                        "Playback recovery attempts failed. Last failure: {reason}. Press Play to retry from the saved position."
+                    ));
+                }
+            } else {
+                self.recovery.finish();
+            }
+        }
+        if self.recovery.retry_at.is_some_and(|when| now >= when) {
+            self.recovery.retry_at = None;
+            match self.coordinator.play() {
+                Ok(request) => self.launch(request),
+                Err(error) => {
+                    self.recovery.finish();
+                    self.error = Some(error.to_string());
+                }
+            }
+        }
+    }
+
     fn poll_with(&mut self, mut start: impl FnMut((HttpRequest, String)) -> Result<S, String>) {
         while let Ok((request, result)) = self.completed.try_recv() {
             match result {
                 Err(error) => {
                     if self.coordinator.resolve_failed(&request) == ResolveOutcome::Failed {
+                        // Empty audio metadata can follow an upstream probe
+                        // failure. It receives the same bounded fresh attempts.
+                        self.retryable = matches!(
+                            error,
+                            ProviderError::Transport(_) | ProviderError::Upstream(_)
+                                | ProviderError::NotFound(_) | ProviderError::NoAudioStream(_)
+                        );
                         self.error = Some(error.to_string());
                     }
                 }
@@ -316,7 +434,9 @@ impl<S: SessionControl> SourcePlayback<S> {
                     } = audio;
                     // The requested target must match this attempt; a calibrated
                     // actual start is separate evidence and may legitimately differ.
-                    if Duration::from_millis(requested_offset_ms) != request.target() {
+                    // Resolver offsets use milliseconds; delivered PCM may
+                    // freeze between millisecond boundaries during recovery.
+                    if u128::from(requested_offset_ms) != request.target().as_millis() {
                         if self.coordinator.resolve_failed(&request) == ResolveOutcome::Failed {
                             self.error =
                                 Some("resolved source target does not match the request".into());
@@ -365,16 +485,78 @@ impl SourcePlayback {
     /// Called on the same thread as player commands. The transport is created
     /// inside the acceptance callback, never before the ticket is validated.
     pub fn poll(&mut self, engine: &Engine) {
+        let now = Instant::now();
+        if self.expire_recovery(now) { return; }
+        let mut observation = None;
         self.poll_with(|(http, format_ext)| {
             let (reader, transport) = HttpReader::start(http)
                 .map_err(|_| "could not start audio transport".to_owned())?;
-            Ok(engine.play_stream(
+            let cancellation = transport.clone();
+            let session = engine.play_stream(
                 Box::new(reader),
                 format_ext,
                 Metadata::default(),
-                move || transport.cancel(),
-            ))
+                move || cancellation.cancel(),
+            );
+            observation = Some(StreamObservation {
+                session: session.clone(),
+                transport,
+            });
+            Ok(session)
         });
+        if observation.is_some() {
+            self.observation = observation;
+        }
+        let snapshot = self.coordinator.snapshot();
+        if snapshot.phase == Phase::Failed && self.error.is_none() {
+            self.retryable = self.observation.as_ref().is_some_and(|observed| {
+                // An output accounting invariant is local; only a failed input
+                // or decoder is evidence for another upstream attempt.
+                observed.session.snapshot().phase == rockbox_playback::StreamPhase::Failed
+                    && retry_stream(&observed.transport.snapshot().terminal)
+            });
+            self.error = Some(match &self.observation {
+                Some(observed) => stream_failure(
+                    &observed.transport.snapshot().terminal,
+                    observed.session.snapshot().decoder_status,
+                ),
+                None => "Audio stream failed. Press Play to retry from the saved position.".into(),
+            });
+        }
+        self.recover(now);
+    }
+}
+
+fn retry_stream(terminal: &TransportTerminal) -> bool {
+    // Fresh resolution can replace an unusable media response, including an
+    // expired URL or a decoder failure under HTTP 200. Do not infer its cause.
+    // Rate limiting needs Retry-After support. A Cancelled transport here may
+    // be cleanup after decoder failure; user cancellation is checked by phase.
+    !matches!(terminal, TransportTerminal::HttpStatus(429))
+}
+
+fn stream_failure(terminal: &TransportTerminal, decoder_status: Option<i32>) -> String {
+    match terminal {
+        TransportTerminal::HttpStatus(status) => {
+            format!("Audio server returned HTTP {status}. Press Play to resolve a fresh stream.")
+        }
+        TransportTerminal::HeaderTimeout => {
+            "Audio server did not respond in time. Press Play to retry.".into()
+        }
+        TransportTerminal::ReadTimeout => {
+            "Audio stream stopped sending data. Press Play to resume.".into()
+        }
+        TransportTerminal::NetworkError => {
+            "Audio stream connection failed. Press Play to resume.".into()
+        }
+        TransportTerminal::RedirectLimit => "Audio stream exceeded the redirect limit.".into(),
+        TransportTerminal::InvalidRedirect => "Audio server returned an invalid redirect.".into(),
+        _ => match decoder_status {
+            Some(code) if code != 0 => {
+                format!("Audio decoder failed (code {code}). Press Play to retry.")
+            }
+            _ => "Audio could not be decoded or delivered. Press Play to retry.".into(),
+        },
     }
 }
 

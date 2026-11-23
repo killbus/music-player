@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { fetcher } from "../../Api/fetcher";
 import { useLikes } from "../../Hooks/useLikes";
 import { usePlayback } from "../../Hooks/usePlayback";
+import { useSourcePlayback } from "../../Hooks/useSourcePlayback";
 import { usePlaybackModes } from "../../Hooks/usePlaybackModes";
 import { useDevices } from "../../Hooks/useDevices";
 import { useLevels } from "../../Hooks/useLevels";
@@ -68,7 +69,8 @@ const PlayerBarWithData = ({
 }: {
   onOpenDevices: () => void;
 }) => {
-  const { nowPlaying, play, pause, next, previous, seek } = usePlayback();
+  const { nowPlaying, play, pause, next, previous, seek, controlError, controlPending } = usePlayback();
+  const sourcePlayback = useSourcePlayback(nowPlaying?.id);
   const modes = usePlaybackModes();
   const { isLiked, toggleLike } = useLikes();
   const [queueOpen, setQueueOpen] = useAtom(queueOpenAtom);
@@ -93,6 +95,10 @@ const PlayerBarWithData = ({
       cover={nowPlaying?.cover}
       stopped={!nowPlaying?.title}
       playing={!!nowPlaying?.isPlaying}
+      starting={sourcePlayback.starting}
+      controlPending={controlPending}
+      playbackError={controlError ?? sourcePlayback.error}
+      playbackMessage={controlPending ? "Sending playback command…" : sourcePlayback.message}
       vuLeft={levels.left}
       vuRight={levels.right}
       progress={nowPlaying?.progress ?? 0}

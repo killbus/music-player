@@ -139,7 +139,7 @@ async fn native_audio_reaches_pcm_with_auth_and_eof_retains_the_pinned_checkpoin
         loop {
             player.poll(&engine);
             assert_ne!(player.snapshot().phase, Phase::Failed, "host audio failed");
-            if player.snapshot().phase == Phase::EndUnconfirmed
+            if player.snapshot().phase == Phase::Recovering
                 && player.snapshot().position.is_some()
                 && received.lock().unwrap().iter().any(|byte| *byte != 0)
                 && server.is_finished() { break; }
@@ -152,7 +152,7 @@ async fn native_audio_reaches_pcm_with_auth_and_eof_retains_the_pinned_checkpoin
         assert_eq!(position.start, StartPosition::RequestedOnly);
         assert!(position.absolute > Duration::from_millis(7_200_123));
         assert!(position.absolute < Duration::from_millis(7_205_123));
-        assert_eq!(snapshot.phase, Phase::EndUnconfirmed);
+        assert_eq!(snapshot.phase, Phase::Recovering);
         assert!(player.is_loaded());
         let checkpoint = player.checkpoint().unwrap();
         assert!(matches!(&checkpoint.selection, AudioSelection::Pinned(pin) if pin.audio_stream_index == 1));

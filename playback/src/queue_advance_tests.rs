@@ -12,20 +12,28 @@ use tokio::{
 };
 
 const AUDIO: &[u8] = include_bytes!("../tests/fixtures/tone-2s.mp3");
+static PLAYBACK_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Response {
     Complete,
     Short,
     Truncated,
     Denied,
+    Recovering,
+    InvalidBody,
+    MissingAudio,
+    MissingPinnedAudio,
+    AuthDenied,
 }
 
 struct Fixture {
     player: PlayerInternal,
     requests: Arc<Mutex<Vec<String>>>,
+    stream_targets: Arc<Mutex<Vec<String>>>,
     events: UnboundedReceiver<PlayerEvent>,
     tasks: Vec<JoinHandle<()>>,
+    _test_lock: tokio::sync::MutexGuard<'static, ()>,
 }
 
 impl Drop for Fixture {
@@ -73,6 +81,7 @@ impl Fixture {
     }
 
     async fn with_volume(response: Response, repeat: i32, volume: u16) -> Self {
+        let test_lock = PLAYBACK_TEST_LOCK.lock().await;
         let connection = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
         Migrator::up(&connection, None).await.unwrap();
         let db = Database { connection };
@@ -112,12 +121,15 @@ impl Fixture {
         });
         let requests = Arc::new(Mutex::new(Vec::new()));
         let recorded = requests.clone();
+        let stream_targets = Arc::new(Mutex::new(Vec::new()));
+        let recorded_targets = stream_targets.clone();
         let server = tokio::spawn(async move {
+            let mut resolutions = 0;
             loop {
                 let (mut socket, _) = http.accept().await.unwrap();
                 let (method, target) = read_request(&mut socket).await;
                 let path = target.split('?').next().unwrap();
-                let duration = if matches!(response, Response::Short) {
+                let duration = if matches!(response, Response::Short | Response::Truncated | Response::MissingPinnedAudio) {
                     600_000_000
                 } else {
                     20_000_000
@@ -125,27 +137,39 @@ impl Fixture {
                 let mut status = "200 OK";
                 let mut extra_length = 0;
                 let body = if method == "POST" && path == "/Users/AuthenticateByName" {
+                    if matches!(response, Response::AuthDenied) { status = "401 Unauthorized"; }
                     serde_json::to_vec(&json!({"AccessToken":"fixture-token", "ServerId":"server-a", "User":{"Id":"user-a"}})).unwrap()
                 } else if let Some(id) = path.strip_prefix("/Users/user-a/Items/") {
                     serde_json::to_vec(&json!({"Id":id, "Name":id, "Type":"Episode", "MediaType":"Video", "RunTimeTicks":duration, "IsFolder":false})).unwrap()
                 } else if path.starts_with("/Items/") && path.ends_with("/PlaybackInfo") {
-                    serde_json::to_vec(&json!({"PlaySessionId":"session-fixture", "MediaSources":[{
-                        "Id":"version-a", "RunTimeTicks":duration, "DefaultAudioStreamIndex":1,
-                        "MediaStreams":[{"Type":"Audio", "Index":1, "Codec":"aac"}]
-                    }]}))
+                    resolutions += 1;
+                    serde_json::to_vec(
+                        &json!({"PlaySessionId":format!("session-{resolutions}"), "MediaSources":[{
+                            "Id":"version-a", "RunTimeTicks":duration, "DefaultAudioStreamIndex":1,
+                            "MediaStreams": if (matches!(response, Response::MissingAudio) && resolutions == 1) || (matches!(response, Response::MissingPinnedAudio) && resolutions == 2) { json!([]) } else { json!([{"Type":"Audio", "Index":1, "Codec":"aac"}]) }
+                        }]}),
+                    )
                     .unwrap()
                 } else if path.starts_with("/Audio/") && path.ends_with("/stream.mp3") {
                     let id = path
                         .trim_start_matches("/Audio/")
                         .trim_end_matches("/stream.mp3");
                     recorded.lock().unwrap().push(id.into());
+                    recorded_targets.lock().unwrap().push(target.clone());
                     assert!(target.contains("AudioStreamIndex=1"));
-                    assert!(target.contains("StartTimeTicks=0"));
+                    if !matches!(response, Response::Short | Response::Truncated | Response::MissingPinnedAudio) {
+                        assert!(target.contains("StartTimeTicks=0"));
+                    }
                     match response {
                         Response::Denied => {
                             status = "403 Forbidden";
                             b"denied".to_vec()
                         }
+                        Response::Recovering if resolutions == 1 => {
+                            status = "403 Forbidden";
+                            b"expired fixture stream".to_vec()
+                        }
+                        Response::InvalidBody if resolutions == 1 => b"<html>upstream temporarily unavailable</html>".to_vec(),
                         Response::Truncated => {
                             extra_length = 1000;
                             AUDIO.to_vec()
@@ -188,13 +212,17 @@ impl Fixture {
         Self {
             player,
             requests,
+            stream_targets,
             events,
             tasks: vec![server, collector],
+            _test_lock: test_lock,
         }
     }
 
     async fn until(&mut self, condition: impl Fn(&Self) -> bool) {
-        tokio::time::timeout(Duration::from_secs(20), async {
+        // This spins a real resolver, decoder and TCP output. Workspace coverage
+        // runs those under heavy parallel instrumentation on shared CI workers.
+        tokio::time::timeout(Duration::from_secs(60), async {
             loop {
                 for task in &self.tasks {
                     assert!(!task.is_finished(), "fixture worker exited early");
@@ -207,7 +235,14 @@ impl Fixture {
             }
         })
         .await
-        .expect("queue did not reach expected state");
+        .unwrap_or_else(|_| {
+            panic!(
+                "queue did not reach expected state: phase={:?}, position_ms={}, requests={:?}",
+                self.player.source_phase,
+                self.player.position_ms,
+                *self.requests.lock().unwrap()
+            )
+        });
     }
 
     async fn settle(&mut self) {
@@ -434,12 +469,11 @@ async fn managed_queue_does_not_skip_short_clean_eof_transport_failure_or_http_e
         let mut f = Fixture::new(response, 0).await;
         f.until(|f| {
             f.player.source_phase == Some(Phase::Failed)
-                || (f.player.source_phase == Some(Phase::EndUnconfirmed)
-                    && f.player.position_ms >= 1900)
         })
         .await;
         f.settle().await;
-        assert_eq!(*f.requests.lock().unwrap(), ["a"]);
+        assert_eq!(*f.requests.lock().unwrap(), ["a", "a", "a"], "{response:?}: {:?}", f.player.source_playback.as_ref().unwrap().status());
+        assert_eq!(f.player.source_playback.as_ref().unwrap().status().unwrap().retry_attempt, 2);
         assert!(f.ends().is_empty());
         assert_eq!(
             f.player
@@ -480,4 +514,155 @@ async fn managed_queue_manual_next_and_pause_cannot_trigger_stale_advance() {
             .title,
         "b"
     );
+}
+
+#[tokio::test]
+async fn failed_stream_automatically_resolves_a_fresh_session() {
+    let mut f = Fixture::new(Response::Recovering, 0).await;
+    f.until(|f| f.player.source_phase == Some(Phase::Recovering))
+        .await;
+    let current = f.player.tracklist.lock().unwrap().current_entry().unwrap();
+    let (reply, received) = tokio::sync::oneshot::channel();
+    f.player
+        .handle_command(PlayerCommand::GetSourcePlayback { reply })
+        .unwrap();
+    let status = received.await.unwrap().unwrap();
+    assert_eq!(status.phase, Phase::Recovering);
+    assert_eq!(status.occurrence_id, current.occurrence_id);
+    assert!(status.error.is_none());
+    assert_eq!(status.retry_attempt, 1);
+    assert!(
+        !f.player
+            .tracklist
+            .lock()
+            .unwrap()
+            .playback_state()
+            .is_playing
+    );
+
+    // No manual Play: the server owns recovery.
+    f.until(|f| f.player.position_ms > 0).await;
+    f.player.handle_pause();
+    assert_eq!(*f.requests.lock().unwrap(), ["a", "a"]);
+    let targets = f.stream_targets.lock().unwrap();
+    assert!(targets[0].contains("PlaySessionId=session-1"));
+    assert!(targets[1].contains("PlaySessionId=session-2"));
+    drop(targets);
+    assert_eq!(
+        f.player
+            .tracklist
+            .lock()
+            .unwrap()
+            .current_entry()
+            .unwrap()
+            .occurrence_id,
+        current.occurrence_id
+    );
+    assert!(f.ends().is_empty());
+}
+
+#[tokio::test]
+async fn pause_resume_reopens_with_the_frozen_output_checkpoint_and_pin() {
+    let mut f = Fixture::new(Response::Short, 0).await;
+    f.until(|f| f.player.position_ms > 0).await;
+    f.player.handle_pause();
+    let paused = f
+        .player
+        .source_playback
+        .as_ref()
+        .unwrap()
+        .checkpoint()
+        .unwrap();
+    assert!(paused.offset_ms > 0);
+    f.settle().await;
+    assert_eq!(f.player.position_ms as u64, paused.offset_ms);
+    assert_eq!(f.requests.lock().unwrap().len(), 1);
+
+    f.player.handle_play();
+    f.until(|f| f.player.position_ms as u64 > paused.offset_ms)
+        .await;
+    let resumed = f
+        .player
+        .source_playback
+        .as_ref()
+        .unwrap()
+        .checkpoint()
+        .unwrap();
+    f.player.handle_pause();
+    assert_eq!(resumed.occurrence_id, paused.occurrence_id);
+    assert_eq!(resumed.selection, paused.selection);
+    assert_eq!(*f.requests.lock().unwrap(), ["a", "a"]);
+    let targets = f.stream_targets.lock().unwrap();
+    assert!(targets[1].contains(&format!("StartTimeTicks={}", paused.offset_ms * 10_000)));
+    assert!(targets[1].contains("PlaySessionId=session-2"));
+    drop(targets);
+    assert!(f.ends().is_empty());
+}
+
+#[tokio::test]
+async fn ambiguous_decoder_and_metadata_failures_recover_without_manual_play() {
+    for response in [Response::InvalidBody, Response::MissingAudio] {
+        let mut f = Fixture::new(response, 0).await;
+        f.until(|f| f.player.source_phase == Some(Phase::Recovering)).await;
+        let occurrence = f.player.tracklist.lock().unwrap().current_entry().unwrap().occurrence_id;
+        f.until(|f| f.player.position_ms > 0).await;
+        f.player.handle_pause();
+        assert_eq!(f.player.tracklist.lock().unwrap().current_entry().unwrap().occurrence_id, occurrence);
+        assert!(f.stream_targets.lock().unwrap().last().unwrap().contains("PlaySessionId=session-2"));
+        assert!(f.ends().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn pause_stop_and_next_cancel_recovery_backoff() {
+    for command in 0..3 {
+        let mut f = Fixture::new(Response::Recovering, 0).await;
+        f.until(|f| f.player.source_phase == Some(Phase::Recovering)).await;
+        // A duplicate Play must not bypass the pending delay.
+        f.player.handle_play();
+        match command {
+            0 => f.player.handle_pause(),
+            1 => f.player.handle_player_stop(),
+            _ => f.player.handle_next(),
+        }
+        for _ in 0..7 { f.settle().await; }
+        let requests = f.requests.lock().unwrap().clone();
+        assert_eq!(requests.iter().filter(|id| *id == "a").count(), 1);
+        if command == 2 {
+            assert_eq!(requests, ["a", "b"]);
+        } else {
+            assert_eq!(requests, ["a"]);
+            assert!(f.ends().is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn explicit_api_auth_denial_is_not_automatically_retried() {
+    let mut f = Fixture::new(Response::AuthDenied, 0).await;
+    f.until(|f| f.player.source_phase == Some(Phase::Failed)).await;
+    for _ in 0..5 { f.settle().await; }
+    let status = f.player.source_playback.as_ref().unwrap().status().unwrap();
+    assert_eq!(status.retry_attempt, 0);
+    assert!(f.requests.lock().unwrap().is_empty());
+    assert!(f.ends().is_empty());
+}
+
+#[tokio::test]
+async fn automatic_resume_preserves_delivered_offset_and_pin_across_missing_metadata() {
+    let mut f = Fixture::new(Response::MissingPinnedAudio, 0).await;
+    f.until(|f| f.player.source_phase == Some(Phase::Recovering)).await;
+    let checkpoint = f.player.source_playback.as_ref().unwrap().checkpoint().unwrap();
+    assert!(checkpoint.offset_ms > 0);
+    assert!(matches!(checkpoint.selection, music_player_types::audio::AudioSelection::Pinned(_)));
+    f.until(|f| f.stream_targets.lock().unwrap().len() == 2 && u64::from(f.player.position_ms) > checkpoint.offset_ms).await;
+    f.player.handle_pause();
+    let resumed = f.player.source_playback.as_ref().unwrap().checkpoint().unwrap();
+    assert_eq!(resumed.selection, checkpoint.selection);
+    assert_eq!(resumed.occurrence_id, checkpoint.occurrence_id);
+    let targets = f.stream_targets.lock().unwrap();
+    assert!(targets[1].contains("PlaySessionId=session-3"));
+    assert!(targets[1].contains(&format!("StartTimeTicks={}", checkpoint.offset_ms * 10_000)));
+    drop(targets);
+    assert!(f.ends().is_empty());
 }
